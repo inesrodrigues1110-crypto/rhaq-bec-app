@@ -97,6 +97,18 @@ def normalizar_data(data_str: str) -> datetime:
     raise ValueError(f"Nao foi possivel converter data: {data_str}")
 
 
+def garantir_float(v) -> float:
+    if isinstance(v, (int, float)):
+        return float(v)
+    return normalizar_numero_pt(str(v))
+
+
+def garantir_data(v) -> datetime:
+    if isinstance(v, datetime):
+        return v
+    return normalizar_data(str(v))
+
+
 def descobrir_mes_ref(nome_pasta: str) -> str:
     meses = {
         "janeiro": "01",
@@ -170,21 +182,46 @@ def extrair_ss_folhas(ss_pdf: Path) -> tuple[float, str, datetime]:
     if not decl:
         raise ValueError("Nao foi possivel extrair o No da Declaracao da SS.")
 
-    total = re.search(r"Total de Contribui[a-zA-Z]+\s*([\d\.\s]+,\d{2})", texto, flags=re.IGNORECASE)
-    if not total:
-        total = re.search(
-            r"Total de Remunera[a-zA-Z]+/Contribui[a-zA-Z]+\s*[\d\.\s]+,\d{2}\s*([\d\.\s]+,\d{2})",
+    total_valor = None
+    # Caso mais direto: "Total de contribuicoes: 16941,86"
+    total_direto = re.search(
+        r"Total de contribui[a-zA-Z]+[:\s]+([\d\.\s]+,\d{2})",
+        texto,
+        flags=re.IGNORECASE,
+    )
+    if total_direto:
+        total_valor = normalizar_numero_pt(total_direto.group(1))
+
+    # Fallback: linha com dois valores (remuneracoes e contribuicoes) -> usar ultimo valor.
+    if total_valor is None:
+        linha_resumo = re.search(
+            r"Total de Remunera[a-zA-Z]+/Contribui[a-zA-Z]+[^\n]*",
             texto,
             flags=re.IGNORECASE,
         )
-    if not total:
+        if linha_resumo:
+            valores = re.findall(r"(\d{1,3}(?:\.\d{3})*,\d{2})", linha_resumo.group(0))
+            if valores:
+                total_valor = normalizar_numero_pt(valores[-1])
+
+    # Fallback final: procurar apos "Total de Contribui..." e apanhar o primeiro valor monetario.
+    if total_valor is None:
+        bloco = re.search(
+            r"Total de Contribui[a-zA-Z]+[\s\S]{0,120}?(\d{1,3}(?:\.\d{3})*,\d{2})",
+            texto,
+            flags=re.IGNORECASE,
+        )
+        if bloco:
+            total_valor = normalizar_numero_pt(bloco.group(1))
+
+    if total_valor is None:
         raise ValueError("Nao foi possivel extrair o valor total da SS.")
 
     data = re.search(r"Data de entrega\s+(\d{4}-\d{2}-\d{2})", texto, flags=re.IGNORECASE)
     if not data:
         raise ValueError("Nao foi possivel extrair a data da declaracao SS.")
 
-    return normalizar_numero_pt(total.group(1)), decl.group(1), normalizar_data(data.group(1))
+    return total_valor, decl.group(1), normalizar_data(data.group(1))
 
 
 def extrair_data_valor_ss(extrato_ss_pdf: Path) -> datetime:
@@ -216,19 +253,20 @@ def extrair_seguro(fatura_pdf: Path, extrato_seg_pdf: Path) -> tuple[float, str,
             data_fat = normalizar_data(data.group(1))
 
     texto_ext = ler_pdf_texto(extrato_seg_pdf)
-    lf = re.search(
-        r"(\d{2}/\d{2}/\d{4})\s+([A-Z]{2}\d+)\s+Fatura\s+(FCT\d+)\s+([\d\.\s]+,\d{2})",
+    linha_fatura = re.search(
+        r"(\d{2}/\d{2}/\d{4})\s+([A-Z]{2}\d+)\s+Fatura\s+(FCT\d+)\s+([0-9\.\s]+,\d{2})",
         texto_ext,
         flags=re.IGNORECASE,
     )
-    if lf:
-        data_pag = normalizar_data(lf.group(1))
-        doc_pag = lf.group(2)
+    if linha_fatura:
+        data_pag = normalizar_data(linha_fatura.group(1))
+        doc_pag = linha_fatura.group(2)
         if numero_fat is None:
-            numero_fat = lf.group(3)
+            numero_fat = linha_fatura.group(3)
         if valor_fat is None:
-            valor_fat = normalizar_numero_pt(lf.group(4))
+            valor_fat = normalizar_numero_pt(linha_fatura.group(4))
     else:
+        # fallback: encontra linha de movimento de seguro e usa o valor monetario da linha
         lp = re.search(
             r"(\d{2}/\d{2}/\d{4})\s+([A-Z]{2}\d+)\s+SEGURO DE ACIDENTES",
             texto_ext,
@@ -238,6 +276,15 @@ def extrair_seguro(fatura_pdf: Path, extrato_seg_pdf: Path) -> tuple[float, str,
             raise ValueError("Nao foi possivel confirmar pagamento do Seguro no extrato.")
         data_pag = normalizar_data(lp.group(1))
         doc_pag = lp.group(2)
+        if valor_fat is None:
+            linha_ini = max(0, lp.start() - 10)
+            linha_fim = texto_ext.find("\n", lp.end())
+            if linha_fim == -1:
+                linha_fim = min(len(texto_ext), lp.end() + 120)
+            linha = texto_ext[linha_ini:linha_fim]
+            vals = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", linha)
+            if vals:
+                valor_fat = normalizar_numero_pt(vals[-1])
 
     if valor_fat is None:
         raise ValueError("Nao foi possivel extrair o valor da fatura de Seguro AT.")
@@ -284,8 +331,13 @@ def mapear_ficheiros(pasta_mes: Path) -> dict:
     return mapa
 
 
-def construir_dataframe_linhas(pasta_mes: Path, colaboradores_override: list[dict] | None = None) -> pd.DataFrame:
+def construir_dataframe_linhas(
+    pasta_mes: Path,
+    colaboradores_override: list[dict] | None = None,
+    campos_override: dict | None = None,
+) -> pd.DataFrame:
     ficheiros = mapear_ficheiros(pasta_mes)
+    campos_override = campos_override or {}
     mes_ref = descobrir_mes_ref(pasta_mes.name)
     ano_m = re.search(r"20\d{2}", pasta_mes.name)
     ano_ref = ano_m.group(0) if ano_m else str(datetime.now().year)
@@ -293,14 +345,44 @@ def construir_dataframe_linhas(pasta_mes: Path, colaboradores_override: list[dic
     colaboradores = colaboradores_override if colaboradores_override is not None else extrair_colaboradores_recibo(
         ficheiros["recibo"]
     )
-    doc_pag_venc, data_pag_venc = extrair_doc_pagamento_vencimento(ficheiros["extrato_venc"], mes_ref)
+    if campos_override.get("venc_doc_pagamento") and campos_override.get("venc_data_pagamento"):
+        doc_pag_venc = str(campos_override["venc_doc_pagamento"])
+        data_pag_venc = garantir_data(campos_override["venc_data_pagamento"])
+    else:
+        doc_pag_venc, data_pag_venc = extrair_doc_pagamento_vencimento(ficheiros["extrato_venc"], mes_ref)
 
-    total_ss, no_decl_ss, data_doc_ss = extrair_ss_folhas(ficheiros["folhas_ss"])
-    data_pag_ss = extrair_data_valor_ss(ficheiros["extrato_ss"])
+    if (
+        campos_override.get("ss_total") is not None
+        and campos_override.get("ss_declaracao")
+        and campos_override.get("ss_data_doc")
+    ):
+        total_ss = garantir_float(campos_override["ss_total"])
+        no_decl_ss = str(campos_override["ss_declaracao"])
+        data_doc_ss = garantir_data(campos_override["ss_data_doc"])
+    else:
+        total_ss, no_decl_ss, data_doc_ss = extrair_ss_folhas(ficheiros["folhas_ss"])
 
-    total_seg, no_fat_seg, data_doc_seg, no_pag_seg, data_pag_seg = extrair_seguro(
-        ficheiros["fatura_seg"], ficheiros["extrato_seg"]
-    )
+    if campos_override.get("ss_data_pagamento"):
+        data_pag_ss = garantir_data(campos_override["ss_data_pagamento"])
+    else:
+        data_pag_ss = extrair_data_valor_ss(ficheiros["extrato_ss"])
+
+    if (
+        campos_override.get("seg_total") is not None
+        and campos_override.get("seg_num_fatura")
+        and campos_override.get("seg_data_doc")
+        and campos_override.get("seg_doc_pagamento")
+        and campos_override.get("seg_data_pagamento")
+    ):
+        total_seg = garantir_float(campos_override["seg_total"])
+        no_fat_seg = str(campos_override["seg_num_fatura"])
+        data_doc_seg = garantir_data(campos_override["seg_data_doc"])
+        no_pag_seg = str(campos_override["seg_doc_pagamento"])
+        data_pag_seg = garantir_data(campos_override["seg_data_pagamento"])
+    else:
+        total_seg, no_fat_seg, data_doc_seg, no_pag_seg, data_pag_seg = extrair_seguro(
+            ficheiros["fatura_seg"], ficheiros["extrato_seg"]
+        )
 
     linhas = []
     for c in colaboradores:

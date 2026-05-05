@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 import argparse
+import calendar
 import re
 import unicodedata
 from copy import copy
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -130,6 +131,46 @@ def descobrir_mes_ref(nome_pasta: str) -> str:
         if nome in base:
             return numero
     raise ValueError(f"Nao foi possivel inferir mes pela pasta: {nome_pasta}")
+
+
+def nome_mes_pt(mes: int) -> str:
+    nomes = {
+        1: "Janeiro",
+        2: "Fevereiro",
+        3: "Marco",
+        4: "Abril",
+        5: "Maio",
+        6: "Junho",
+        7: "Julho",
+        8: "Agosto",
+        9: "Setembro",
+        10: "Outubro",
+        11: "Novembro",
+        12: "Dezembro",
+    }
+    return nomes.get(mes, str(mes))
+
+
+def inferir_ano_mes(pasta_mes: Path, ficheiros: dict) -> tuple[int, int]:
+    # Prioridade: nome do recibo com formato 2025.05
+    recibo_nome = ficheiros.get("recibo").name if ficheiros.get("recibo") else ""
+    m = re.search(r"(20\d{2})[.\-/](\d{2})", recibo_nome)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+
+    # Fallback: pasta
+    ano_m = re.search(r"20\d{2}", pasta_mes.name)
+    mes_ref = descobrir_mes_ref(pasta_mes.name)
+    ano = int(ano_m.group(0)) if ano_m else datetime.now().year
+    return ano, int(mes_ref)
+
+
+def ultimo_dia_util_mes(ano: int, mes: int) -> datetime:
+    ultimo_dia = calendar.monthrange(ano, mes)[1]
+    dt = datetime(ano, mes, ultimo_dia)
+    while dt.weekday() >= 5:  # sabado/domingo
+        dt -= timedelta(days=1)
+    return dt
 
 
 def extrair_colaboradores_recibo(recibo_pdf: Path) -> list[dict]:
@@ -370,9 +411,11 @@ def construir_dataframe_linhas(
 ) -> pd.DataFrame:
     ficheiros = mapear_ficheiros(pasta_mes)
     campos_override = campos_override or {}
-    mes_ref = descobrir_mes_ref(pasta_mes.name)
-    ano_m = re.search(r"20\d{2}", pasta_mes.name)
-    ano_ref = ano_m.group(0) if ano_m else str(datetime.now().year)
+    ano_int, mes_int = inferir_ano_mes(pasta_mes, ficheiros)
+    mes_ref = f"{mes_int:02d}"
+    ano_ref = str(ano_int)
+    mes_label = f"{nome_mes_pt(mes_int)} {ano_ref}"
+    data_recibo = ultimo_dia_util_mes(ano_int, mes_int)
 
     colaboradores = colaboradores_override if colaboradores_override is not None else extrair_colaboradores_recibo(
         ficheiros["recibo"]
@@ -422,8 +465,8 @@ def construir_dataframe_linhas(
             {
                 "categoria custo": CATEGORIA_CUSTO,
                 "doc despesa": "Remuneracoes",
-                "descricao": f"Recibo de vencimento {c['nome']} - {pasta_mes.name}",
-                "data doc despesa": data_pag_venc,
+                "descricao": f"Recibo de vencimento {c['nome']} - {mes_label}",
+                "data doc despesa": data_recibo,
                 "n doc despesa": "Recibo Vencimento",
                 "nif fornecedor": c["nif"],
                 "nome fornecedor": c["nome"],
@@ -446,7 +489,7 @@ def construir_dataframe_linhas(
         {
             "categoria custo": CATEGORIA_CUSTO,
             "doc despesa": "Contribuicoes Seguranca Social",
-            "descricao": f"TSU {pasta_mes.name}",
+            "descricao": f"TSU {mes_label}",
             "data doc despesa": data_doc_ss,
             "n doc despesa": f"DR {no_decl_ss}",
             "nif fornecedor": NIF_SS_FIXO,
@@ -470,8 +513,8 @@ def construir_dataframe_linhas(
         {
             "categoria custo": CATEGORIA_CUSTO,
             "doc despesa": "Seguro de acidentes de Trabalho",
-            "descricao": f"Seguro AT {pasta_mes.name}",
-            "data doc despesa": data_doc_seg,
+            "descricao": f"Seguro AT {mes_label}",
+            "data doc despesa": data_pag_seg,
             "n doc despesa": no_fat_seg,
             "nif fornecedor": "",
             "nome fornecedor": "Seguro Acidentes Trabalho",

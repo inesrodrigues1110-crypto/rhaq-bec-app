@@ -178,6 +178,7 @@ def extrair_doc_pagamento_vencimento(extrato_pdf: Path, mes_ref: str) -> tuple[s
 
 def extrair_ss_folhas(ss_pdf: Path) -> tuple[float, str, datetime]:
     texto = ler_pdf_texto(ss_pdf)
+    texto_slug = slug(texto)
     decl = re.search(r"Identificador\s+DR\s+(\d+)", texto, flags=re.IGNORECASE)
     if not decl:
         raise ValueError("Nao foi possivel extrair o No da Declaracao da SS.")
@@ -192,6 +193,16 @@ def extrair_ss_folhas(ss_pdf: Path) -> tuple[float, str, datetime]:
     if total_direto:
         total_valor = normalizar_numero_pt(total_direto.group(1))
 
+    # Versao normalizada sem acentos/simbolos (mais robusta em PDFs com encoding degradado)
+    if total_valor is None:
+        total_direto_slug = re.search(
+            r"total de contribu\w+\s+(\d{1,3}(?:\.\d{3})*,\d{2})",
+            texto_slug,
+            flags=re.IGNORECASE,
+        )
+        if total_direto_slug:
+            total_valor = normalizar_numero_pt(total_direto_slug.group(1))
+
     # Fallback: linha com dois valores (remuneracoes e contribuicoes) -> usar ultimo valor.
     if total_valor is None:
         linha_resumo = re.search(
@@ -204,6 +215,18 @@ def extrair_ss_folhas(ss_pdf: Path) -> tuple[float, str, datetime]:
             if valores:
                 total_valor = normalizar_numero_pt(valores[-1])
 
+    # Fallback adicional: linha de estabelecimento/ano-mes com dois montantes.
+    if total_valor is None:
+        linha_mes = re.search(
+            r"\b20\d{2}[-/]\d{2}\b[^\n]*",
+            texto,
+            flags=re.IGNORECASE,
+        )
+        if linha_mes:
+            valores = re.findall(r"(\d{1,3}(?:\.\d{3})*,\d{2})", linha_mes.group(0))
+            if len(valores) >= 2:
+                total_valor = normalizar_numero_pt(valores[-1])
+
     # Fallback final: procurar apos "Total de Contribui..." e apanhar o primeiro valor monetario.
     if total_valor is None:
         bloco = re.search(
@@ -213,6 +236,15 @@ def extrair_ss_folhas(ss_pdf: Path) -> tuple[float, str, datetime]:
         )
         if bloco:
             total_valor = normalizar_numero_pt(bloco.group(1))
+
+    # Ultimo fallback: no bloco "extrato de resumo", usa o ultimo montante monetario relevante.
+    if total_valor is None:
+        resumo_ini = texto_slug.find("extrato de resumo")
+        if resumo_ini != -1:
+            resumo = texto[resumo_ini : min(len(texto), resumo_ini + 1500)]
+            valores = re.findall(r"(\d{1,3}(?:\.\d{3})*,\d{2})", resumo)
+            if valores:
+                total_valor = normalizar_numero_pt(valores[-1])
 
     if total_valor is None:
         raise ValueError("Nao foi possivel extrair o valor total da SS.")

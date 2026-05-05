@@ -284,13 +284,15 @@ def mapear_ficheiros(pasta_mes: Path) -> dict:
     return mapa
 
 
-def construir_dataframe_linhas(pasta_mes: Path) -> pd.DataFrame:
+def construir_dataframe_linhas(pasta_mes: Path, colaboradores_override: list[dict] | None = None) -> pd.DataFrame:
     ficheiros = mapear_ficheiros(pasta_mes)
     mes_ref = descobrir_mes_ref(pasta_mes.name)
     ano_m = re.search(r"20\d{2}", pasta_mes.name)
     ano_ref = ano_m.group(0) if ano_m else str(datetime.now().year)
 
-    colaboradores = extrair_colaboradores_recibo(ficheiros["recibo"])
+    colaboradores = colaboradores_override if colaboradores_override is not None else extrair_colaboradores_recibo(
+        ficheiros["recibo"]
+    )
     doc_pag_venc, data_pag_venc = extrair_doc_pagamento_vencimento(ficheiros["extrato_venc"], mes_ref)
 
     total_ss, no_decl_ss, data_doc_ss = extrair_ss_folhas(ficheiros["folhas_ss"])

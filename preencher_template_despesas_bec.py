@@ -149,13 +149,13 @@ def extrair_colaboradores_recibo(recibo_pdf: Path) -> list[dict]:
 def extrair_doc_pagamento_vencimento(extrato_pdf: Path, mes_ref: str) -> tuple[str, datetime]:
     texto = ler_pdf_texto(extrato_pdf)
     padrao_mes = re.compile(
-        rf"(\d{{2}}/\d{{2}}/\d{{4}})\s+([A-Z]{{2}}\d+)\s+Processamento\s+Sal[a-zA-Z]+\s+20\d{{2}}\.\s*{mes_ref}",
+        rf"(\d{{2}}/\d{{2}}/\d{{4}})\s+([A-Z]{{2}}\d+)\s+Processamento\s+Sal\S*\s+20\d{{2}}\.\s*{mes_ref}",
         re.IGNORECASE,
     )
     m = padrao_mes.search(texto)
     if not m:
         m = re.search(
-            r"(\d{2}/\d{2}/\d{4})\s+([A-Z]{2}\d+)\s+Processamento\s+Sal[a-zA-Z]+",
+            r"(\d{2}/\d{2}/\d{4})\s+([A-Z]{2}\d+)\s+Processamento\s+Sal\S*",
             texto,
             flags=re.IGNORECASE,
         )

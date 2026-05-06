@@ -126,10 +126,13 @@ st.markdown(
     """
 Em cada pasta (ou ZIP), os PDFs devem seguir a nomenclatura:
 - `1. Recibo [data].pdf`
+- `2. Comprovativo pagamento vencimentos.pdf` (obrigatorio)
 - `3. Extrato contabilistico vencimento.pdf` (ou vencimento)
 - `7. Folhas de Remuneracao SS.pdf`
+- `8. Comprovativo pagamento SS.pdf` (obrigatorio)
 - `9. Extrato contabilistico SS.pdf`
 - `10. Fatura Seguro AT.pdf`
+- `11. Comprovativo pagamento Seguro.pdf` (obrigatorio)
 - `12. Extrato contabilistico Seguro.pdf`
 """
 )

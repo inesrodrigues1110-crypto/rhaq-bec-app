@@ -208,6 +208,46 @@ def extrair_valor_destacado_amarelo_com_texto(pdf_path: Path, texto_alvo: str) -
     return None
 
 
+def extrair_linha_destacada_amarelo(pdf_path: Path) -> str | None:
+    """
+    Devolve o texto da linha destacada a amarelo com maior area.
+    Usado para docs de pagamento (2/8/11) para priorizar Y/Z.
+    """
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            melhor_linha = None
+            melhor_score = -1.0
+            for page in pdf.pages:
+                rects = page.rects or []
+                words = page.extract_words() or []
+                if not rects or not words:
+                    continue
+                for r in rects:
+                    if not _is_yellow_color(r.get("non_stroking_color")):
+                        continue
+                    rx0 = float(r.get("x0", 0)) - 8
+                    rx1 = float(r.get("x1", 0)) + 8
+                    rtop = float(r.get("top", 0)) - 3
+                    rbot = float(r.get("bottom", 0)) + 3
+                    linha_words = []
+                    for w in words:
+                        wx0, wx1 = float(w["x0"]), float(w["x1"])
+                        wtop, wbot = float(w["top"]), float(w["bottom"])
+                        if wx1 >= rx0 and wx0 <= rx1 and wbot >= rtop and wtop <= rbot:
+                            linha_words.append(w)
+                    if not linha_words:
+                        continue
+                    linha_words.sort(key=lambda w: (w["top"], w["x0"]))
+                    linha_txt = " ".join(w["text"] for w in linha_words).strip()
+                    score = (rx1 - rx0) * (rbot - rtop)
+                    if linha_txt and score > melhor_score:
+                        melhor_score = score
+                        melhor_linha = linha_txt
+            return melhor_linha
+    except Exception:
+        return None
+
+
 def normalizar_numero_pt(valor_str: str) -> float:
     limpo = re.sub(r"[^\d,.\-]", "", valor_str).replace(".", "").replace(",", ".")
     return float(limpo)
@@ -365,6 +405,88 @@ def extrair_doc_pagamento_vencimento(extrato_pdf: Path, mes_ref: str) -> tuple[s
     return m.group(2), normalizar_data(m.group(1))
 
 
+def extrair_doc_pagamento_generico(
+    pdf_path: Path, preferir_data_operacao: bool = False
+) -> tuple[str, datetime] | None:
+    """
+    Extrai No/Data de um comprovativo de pagamento (docs 2, 8, 11).
+    Prioriza referencia bancaria tipo "Millenium - 2025/005".
+    """
+    texto = ler_pdf_texto_auto(pdf_path, OCR_LANG)
+    if not texto.strip():
+        return None
+
+    padrao_ref = re.compile(
+        r"((?:Millenium|Milenium|Millennium|Novo\s*Banco|Santander|CGD)\s*-\s*\d{1,4}/\d{4})",
+        flags=re.IGNORECASE,
+    )
+
+    # Prioridade maxima: linha destacada a amarelo no comprovativo.
+    linha_amarela = extrair_linha_destacada_amarelo(pdf_path)
+    if linha_amarela:
+        m_ref = padrao_ref.search(linha_amarela)
+        m_data = re.search(r"(\d{2}/\d{2}/\d{4})", linha_amarela)
+        if m_ref and m_data:
+            ref_txt = re.sub(r"\s+", " ", m_ref.group(1)).strip()
+            ref_txt = re.sub(r"(?i)milenium|millennium", "Millenium", ref_txt)
+            ref_txt = re.sub(r"(?i)novo\s*banco", "Novo Banco", ref_txt)
+            return ref_txt, normalizar_data(m_data.group(1))
+
+    # Para docs 8/11: prioriza "Data da Operacao".
+    if preferir_data_operacao:
+        data_op = re.search(r"Data da Opera\w*[^\d]*(\d{2}/\d{2}/\d{4})", texto, flags=re.IGNORECASE)
+        ref_any = padrao_ref.search(texto)
+        if data_op and ref_any:
+            ref_txt = re.sub(r"\s+", " ", ref_any.group(1)).strip()
+            ref_txt = re.sub(r"(?i)milenium|millennium", "Millenium", ref_txt)
+            ref_txt = re.sub(r"(?i)novo\s*banco", "Novo Banco", ref_txt)
+            return ref_txt, normalizar_data(data_op.group(1))
+
+    linhas = texto.splitlines()
+    for i, linha in enumerate(linhas):
+        m_ref = padrao_ref.search(linha)
+        if not m_ref:
+            continue
+        ref_txt = re.sub(r"\s+", " ", m_ref.group(1)).strip()
+        # Normaliza grafia para manter consistencia no Excel.
+        ref_txt = re.sub(r"(?i)milenium|millennium", "Millenium", ref_txt)
+        ref_txt = re.sub(r"(?i)novo\s*banco", "Novo Banco", ref_txt)
+
+        # Prioridade: data na mesma linha da referencia.
+        m_data = re.search(r"(\d{2}/\d{2}/\d{4})", linha)
+        if m_data:
+            return ref_txt, normalizar_data(m_data.group(1))
+
+        # Fallback: procura data perto da linha (acima/abaixo imediato).
+        janela = " ".join(linhas[max(0, i - 1) : min(len(linhas), i + 2)])
+        m_data_janela = re.search(r"(\d{2}/\d{2}/\d{4})", janela)
+        if m_data_janela:
+            return ref_txt, normalizar_data(m_data_janela.group(1))
+
+    # Fallback final: primeira referencia + primeira data.
+    ref = padrao_ref.search(texto)
+    data = re.search(r"(\d{2}/\d{2}/\d{4})", texto)
+    if ref and data:
+        ref_txt = re.sub(r"\s+", " ", ref.group(1)).strip()
+        ref_txt = re.sub(r"(?i)milenium|millennium", "Millenium", ref_txt)
+        ref_txt = re.sub(r"(?i)novo\s*banco", "Novo Banco", ref_txt)
+        return ref_txt, normalizar_data(data.group(1))
+    return None
+
+
+def extrair_lancamento_vencimento(extrato_pdf: Path, ano_ref: str, mes_ref: str) -> str:
+    texto = ler_pdf_texto(extrato_pdf)
+    padrao = re.compile(
+        rf"\d{{2}}/\d{{2}}/\d{{4}}\s+([A-Z]{{2}}\d+)\s+Processamento\s+Sal\S*\s+{re.escape(ano_ref)}\.\s*{re.escape(mes_ref)}",
+        flags=re.IGNORECASE,
+    )
+    m = padrao.search(texto)
+    if m:
+        return m.group(1)
+    fallback = re.search(r"\d{2}/\d{2}/\d{4}\s+([A-Z]{2}\d+)\s+Processamento\s+Sal\S*", texto, flags=re.IGNORECASE)
+    return fallback.group(1) if fallback else ""
+
+
 def extrair_ss_folhas(ss_pdf: Path) -> tuple[float, str, datetime]:
     texto = ler_pdf_texto(ss_pdf)
     texto_slug = slug(texto)
@@ -483,6 +605,19 @@ def extrair_doc_pagamento_ss(extrato_ss_pdf: Path) -> str:
     return "Pagamento SS"
 
 
+def extrair_lancamento_ss(extrato_ss_pdf: Path, ano_ref: str, mes_ref: str) -> str:
+    texto = ler_pdf_texto(extrato_ss_pdf)
+    padrao = re.compile(
+        rf"\d{{2}}/\d{{2}}/\d{{4}}\s+([A-Z]{{2}}\d+)\s+Processamento\s+Sal\S*\s+{re.escape(ano_ref)}\.\s*{re.escape(mes_ref)}",
+        flags=re.IGNORECASE,
+    )
+    m = padrao.search(texto)
+    if m:
+        return m.group(1)
+    fallback = re.search(r"\d{2}/\d{2}/\d{4}\s+([A-Z]{2}\d+)\s+", texto)
+    return fallback.group(1) if fallback else ""
+
+
 def extrair_imputado_ss_extrato(extrato_ss_pdf: Path, ano_ref: str | None = None, mes_ref: str | None = None) -> float | None:
     # Regra unica: valor da linha destacada a amarelo no documento 9.
     val_amarelo = extrair_valor_destacado_amarelo(extrato_ss_pdf)
@@ -560,6 +695,24 @@ def extrair_imputado_seguro_colaborador(extrato_seg_pdf: Path, nome_colaborador:
             if candidatos:
                 return candidatos[-1]
     return None
+
+
+def extrair_lancamento_seguro(extrato_seg_pdf: Path, nome_colaborador: str) -> str:
+    texto = ler_pdf_texto(extrato_seg_pdf)
+    alvo = slug(nome_colaborador)
+    for linha in texto.splitlines():
+        s = slug(linha)
+        if "afetacao" in s and "seg" in s and alvo and alvo in s:
+            m = re.search(r"\b([A-Z]{2}\d+)\b", linha)
+            if m:
+                return m.group(1)
+    for linha in texto.splitlines():
+        s = slug(linha)
+        if "afetacao" in s and "seg" in s and "joao" in s and "ferreira" in s:
+            m = re.search(r"\b([A-Z]{2}\d+)\b", linha)
+            if m:
+                return m.group(1)
+    return ""
 
 
 def extrair_seguro(fatura_pdf: Path, extrato_seg_pdf: Path) -> tuple[float, str, datetime, str, datetime]:
@@ -645,14 +798,20 @@ def mapear_ficheiros(pasta_mes: Path) -> dict:
         n = slug(f.name)
         if n.startswith("1 recibo"):
             mapa["recibo"] = f
+        elif n.startswith("2 "):
+            mapa["pag_venc"] = f
         elif n.startswith("3 extrato") and "vencimento" in n:
             mapa["extrato_venc"] = f
         elif n.startswith("7 folhas"):
             mapa["folhas_ss"] = f
+        elif n.startswith("8 "):
+            mapa["pag_ss"] = f
         elif n.startswith("9 extrato") and "ss" in n:
             mapa["extrato_ss"] = f
         elif n.startswith("10 fatura"):
             mapa["fatura_seg"] = f
+        elif n.startswith("11 "):
+            mapa["pag_seg"] = f
         elif n.startswith("12 extrato") and "seguro" in n:
             mapa["extrato_seg"] = f
 
@@ -685,7 +844,12 @@ def construir_dataframe_linhas(
         doc_pag_venc = str(campos_override["venc_doc_pagamento"])
         data_pag_venc = garantir_data(campos_override["venc_data_pagamento"])
     else:
-        doc_pag_venc, data_pag_venc = extrair_doc_pagamento_vencimento(ficheiros["extrato_venc"], mes_ref)
+        pag_venc_pdf = ficheiros.get("pag_venc")
+        parsed_pag_venc = extrair_doc_pagamento_generico(pag_venc_pdf) if pag_venc_pdf else None
+        if parsed_pag_venc:
+            doc_pag_venc, data_pag_venc = parsed_pag_venc
+        else:
+            doc_pag_venc, data_pag_venc = extrair_doc_pagamento_vencimento(ficheiros["extrato_venc"], mes_ref)
 
     if (
         campos_override.get("ss_total") is not None
@@ -701,11 +865,30 @@ def construir_dataframe_linhas(
     if campos_override.get("ss_data_pagamento"):
         data_pag_ss = garantir_data(campos_override["ss_data_pagamento"])
     else:
-        data_pag_ss = extrair_data_valor_ss(ficheiros["extrato_ss"])
+        pag_ss_pdf = ficheiros.get("pag_ss")
+        parsed_pag_ss = (
+            extrair_doc_pagamento_generico(pag_ss_pdf, preferir_data_operacao=True)
+            if pag_ss_pdf
+            else None
+        )
+        if parsed_pag_ss:
+            _, data_pag_ss = parsed_pag_ss
+        else:
+            data_pag_ss = extrair_data_valor_ss(ficheiros["extrato_ss"])
     if campos_override.get("ss_doc_pagamento"):
         no_pag_ss = str(campos_override["ss_doc_pagamento"])
     else:
-        no_pag_ss = extrair_doc_pagamento_ss(ficheiros["extrato_ss"])
+        pag_ss_pdf = ficheiros.get("pag_ss")
+        parsed_pag_ss = (
+            extrair_doc_pagamento_generico(pag_ss_pdf, preferir_data_operacao=True)
+            if pag_ss_pdf
+            else None
+        )
+        if parsed_pag_ss:
+            no_pag_ss, _ = parsed_pag_ss
+        else:
+            no_pag_ss = extrair_doc_pagamento_ss(ficheiros["extrato_ss"])
+    lanc_ss = extrair_lancamento_ss(ficheiros["extrato_ss"], ano_ref=ano_ref, mes_ref=mes_ref)
 
     if (
         campos_override.get("seg_total") is not None
@@ -723,6 +906,14 @@ def construir_dataframe_linhas(
         total_seg, no_fat_seg, data_doc_seg, no_pag_seg, data_pag_seg = extrair_seguro(
             ficheiros["fatura_seg"], ficheiros["extrato_seg"]
         )
+        pag_seg_pdf = ficheiros.get("pag_seg")
+        parsed_pag_seg = (
+            extrair_doc_pagamento_generico(pag_seg_pdf, preferir_data_operacao=True)
+            if pag_seg_pdf
+            else None
+        )
+        if parsed_pag_seg:
+            no_pag_seg, data_pag_seg = parsed_pag_seg
 
     # Imputado SS: regra de negocio -> tentar ler do doc 9 primeiro.
     imputado_ss = extrair_imputado_ss_extrato(ficheiros["extrato_ss"], ano_ref=ano_ref, mes_ref=mes_ref)
@@ -746,6 +937,9 @@ def construir_dataframe_linhas(
                 "Nao foi possivel extrair 'Seguro imputado' (afetacao do colaborador) do documento 12. "
                 "Preenche o campo manual 'Seguro - Imputado'."
             )
+    nome_ref_lanc = colaboradores[0]["nome"] if colaboradores else ""
+    lanc_seg = extrair_lancamento_seguro(ficheiros["extrato_seg"], nome_ref_lanc)
+    lanc_venc = extrair_lancamento_vencimento(ficheiros["extrato_venc"], ano_ref=ano_ref, mes_ref=mes_ref)
 
     linhas = []
     for c in colaboradores:
@@ -765,6 +959,7 @@ def construir_dataframe_linhas(
                 "total doc despesa": bruto,
                 "mapa de investimentos": 1,
                 "rubrica": RUBRICA_REMUN,
+                "n lancamento contabilistico": lanc_venc,
                 "imputado doc despesa": imputado_remun,
                 "elegivel doc despesa": imputado_remun,
                 "doc pagamento": "Extrato Bancario",
@@ -789,6 +984,7 @@ def construir_dataframe_linhas(
             "total doc despesa": total_ss,
             "mapa de investimentos": 1,
             "rubrica": RUBRICA_SS,
+            "n lancamento contabilistico": lanc_ss,
             "imputado doc despesa": imputado_ss,
             "elegivel doc despesa": imputado_ss,
             "doc pagamento": "Extrato Bancario",
@@ -813,6 +1009,7 @@ def construir_dataframe_linhas(
             "total doc despesa": total_seg,
             "mapa de investimentos": 1,
             "rubrica": RUBRICA_SEG,
+            "n lancamento contabilistico": lanc_seg,
             "imputado doc despesa": imputado_seg,
             "elegivel doc despesa": imputado_seg,
             "doc pagamento": "Extrato Bancario",

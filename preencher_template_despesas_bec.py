@@ -27,7 +27,7 @@ RUBRICA_REMUN = "632 - Remuneracoes do pessoal"
 RUBRICA_SS = "635 - Encargos sobre remuneracoes"
 RUBRICA_SEG = "636 - Seguros de acidentes no trabalho e doencas profissionais"
 NIF_SS_FIXO = "505305500"
-NIF_GENERALI_FIXO = "50094023"
+NIF_GENERALI_FIXO = "500940231"
 OCR_LANG = "por"
 POPPLER_PATH = ""
 
@@ -215,6 +215,16 @@ def deduplicar_colaboradores(colaboradores: list[dict]) -> list[dict]:
 
 def extrair_doc_pagamento_vencimento(extrato_pdf: Path, mes_ref: str) -> tuple[str, datetime]:
     texto = ler_pdf_texto(extrato_pdf)
+    # Prioridade: referencia no formato "Banco - 2025/005"
+    ref_banco = re.search(
+        r"((?:Millenium|Milenium|Novo\s*Banco|Santander|CGD)\s*-\s*\d{1,4}/\d{4})",
+        texto,
+        flags=re.IGNORECASE,
+    )
+    data_qualquer = re.search(r"(\d{2}/\d{2}/\d{4})", texto)
+    if ref_banco and data_qualquer:
+        return re.sub(r"\s+", " ", ref_banco.group(1)).strip(), normalizar_data(data_qualquer.group(1))
+
     padrao_mes = re.compile(
         rf"(\d{{2}}/\d{{2}}/\d{{4}})\s+([A-Z]{{2}}\d+)\s+Processamento\s+Sal\S*\s+20\d{{2}}\.\s*{mes_ref}",
         re.IGNORECASE,
@@ -336,6 +346,13 @@ def extrair_data_valor_ss(extrato_ss_pdf: Path) -> datetime:
 
 def extrair_doc_pagamento_ss(extrato_ss_pdf: Path) -> str:
     texto = ler_pdf_texto(extrato_ss_pdf)
+    ref_banco = re.search(
+        r"((?:Millenium|Milenium|Novo\s*Banco|Santander|CGD)\s*-\s*\d{1,4}/\d{4})",
+        texto,
+        flags=re.IGNORECASE,
+    )
+    if ref_banco:
+        return re.sub(r"\s+", " ", ref_banco.group(1)).strip()
     m = re.search(r"\d{2}/\d{2}/\d{4}\s+([A-Za-z0-9][A-Za-z0-9/\-\. ]{2,40})", texto)
     if m:
         return re.sub(r"\s+", " ", m.group(1)).strip()
@@ -354,6 +371,16 @@ def extrair_imputado_ss_extrato(extrato_ss_pdf: Path) -> float | None:
             vals = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", linha)
             if vals:
                 return normalizar_numero_pt(vals[-1])
+
+    # Heuristica: valor SS imputado costuma ser montante baixo no bloco de movimento SS.
+    # Ignora montantes altos (totais pagos da SS) e procura primeiro montante entre 1 e 2000.
+    linha_ss = re.search(r"[^\n]*(?:seguranca\s+social|ss)[^\n]*", texto, flags=re.IGNORECASE)
+    if linha_ss:
+        vals = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", linha_ss.group(0))
+        nums = [normalizar_numero_pt(v) for v in vals]
+        candidatos = [n for n in nums if 1 <= n <= 2000]
+        if candidatos:
+            return candidatos[-1]
 
     # Fallback: no bloco SS do extrato, usar o ultimo montante da linha de movimento.
     linha_ss = re.search(r"[^\n]*seguranca\s+social[^\n]*", texto, flags=re.IGNORECASE)
@@ -407,6 +434,11 @@ def extrair_seguro(fatura_pdf: Path, extrato_seg_pdf: Path) -> tuple[float, str,
             data_fat = normalizar_data(data.group(1))
 
     texto_ext = ler_pdf_texto(extrato_seg_pdf)
+    ref_banco = re.search(
+        r"((?:Millenium|Milenium|Novo\s*Banco|Santander|CGD)\s*-\s*\d{1,4}/\d{4})",
+        texto_ext,
+        flags=re.IGNORECASE,
+    )
     linha_fatura = re.search(
         r"(\d{2}/\d{2}/\d{4})\s+([A-Z]{2}\d+)\s+Fatura\s+(FCT\d+)\s+([0-9\.\s]+,\d{2})",
         texto_ext,
@@ -414,7 +446,7 @@ def extrair_seguro(fatura_pdf: Path, extrato_seg_pdf: Path) -> tuple[float, str,
     )
     if linha_fatura:
         data_pag = normalizar_data(linha_fatura.group(1))
-        doc_pag = linha_fatura.group(2)
+        doc_pag = re.sub(r"\s+", " ", ref_banco.group(1)).strip() if ref_banco else linha_fatura.group(2)
         if numero_fat is None:
             numero_fat = linha_fatura.group(3)
         if valor_fat is None:
@@ -429,7 +461,7 @@ def extrair_seguro(fatura_pdf: Path, extrato_seg_pdf: Path) -> tuple[float, str,
         if not lp:
             raise ValueError("Nao foi possivel confirmar pagamento do Seguro no extrato.")
         data_pag = normalizar_data(lp.group(1))
-        doc_pag = lp.group(2)
+        doc_pag = re.sub(r"\s+", " ", ref_banco.group(1)).strip() if ref_banco else lp.group(2)
         if valor_fat is None:
             linha_ini = max(0, lp.start() - 10)
             linha_fim = texto_ext.find("\n", lp.end())

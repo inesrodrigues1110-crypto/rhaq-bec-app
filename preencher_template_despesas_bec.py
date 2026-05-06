@@ -574,6 +574,17 @@ def extrair_imputado_seguro_colaborador(extrato_seg_pdf: Path, nome_colaborador:
 
     alvo = slug(nome_colaborador)
     linhas = texto.splitlines()
+    # Fallback robusto: linha de "Afetacao ... <nome>" no extrato.
+    for linha in linhas:
+        s = slug(linha)
+        if "afetacao" in s and alvo in s:
+            vals = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", linha)
+            if vals:
+                nums = [normalizar_numero_pt(v) for v in vals]
+                candidatos = [n for n in nums if 1 <= n <= 2000]
+                if candidatos:
+                    return candidatos[-1]
+
     candidatos_total: list[float] = []
     for i, linha in enumerate(linhas):
         if alvo and alvo in slug(linha):

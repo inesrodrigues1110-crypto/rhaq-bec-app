@@ -567,6 +567,16 @@ def extrair_imputado_seguro_colaborador(extrato_seg_pdf: Path, nome_colaborador:
     if not texto.strip() or not nome_colaborador.strip():
         return None
 
+    # Fallback principal em texto corrido (quando o PDF perde quebras de linha).
+    texto_slug = slug(texto)
+    padrao_texto_corrido = re.search(
+        r"afetacao\s+seg\w*\s+at\s+\d{2}\s+20\d{2}\s+joao\s+ferreira[\s\S]{0,60}?(\d{1,3}(?:[\.\s]\d{3})*,\d{2})",
+        texto_slug,
+        flags=re.IGNORECASE,
+    )
+    if padrao_texto_corrido:
+        return normalizar_numero_pt(padrao_texto_corrido.group(1))
+
     # Regra hard: linha "Afetacao ... Joao Ferreira" no documento 12.
     alvo_nome = slug(nome_colaborador)
     for linha in texto.splitlines():

@@ -484,71 +484,10 @@ def extrair_doc_pagamento_ss(extrato_ss_pdf: Path) -> str:
 
 
 def extrair_imputado_ss_extrato(extrato_ss_pdf: Path, ano_ref: str | None = None, mes_ref: str | None = None) -> float | None:
-    # Regra principal: valor da linha destacada a amarelo no documento 9.
+    # Regra unica: valor da linha destacada a amarelo no documento 9.
     val_amarelo = extrair_valor_destacado_amarelo(extrato_ss_pdf)
     if val_amarelo is not None:
         return val_amarelo
-
-    texto = ler_pdf_texto(extrato_ss_pdf)
-    if not texto.strip():
-        return None
-
-    # Prioridade maxima: linha do movimento mensal "Processamento Salarios AAAA.MM"
-    if ano_ref and mes_ref:
-        padrao_mes = re.compile(
-            rf"[^\n]*Processamento\s+Sal\S*\s+{re.escape(ano_ref)}\.\s*{re.escape(mes_ref)}[^\n]*",
-            flags=re.IGNORECASE,
-        )
-        candidatos_mes: list[float] = []
-        for linha in texto.splitlines():
-            if padrao_mes.search(linha):
-                vals = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", linha)
-                if vals:
-                    nums = [normalizar_numero_pt(v) for v in vals]
-                    candidatos = [n for n in nums if 1 <= n <= 2000]
-                    candidatos_mes.extend(candidatos)
-        if candidatos_mes:
-            # Evita adivinhar quando ha varios montantes possiveis no mesmo mes.
-            unicos = sorted(set(round(n, 2) for n in candidatos_mes))
-            if len(unicos) == 1:
-                return unicos[0]
-            return None
-
-    # Preferir linhas com pistas de quota/trabalhador/11% no extrato.
-    for linha in texto.splitlines():
-        s = slug(linha)
-        if any(k in s for k in ("quota", "trabalhador", "11")):
-            vals = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", linha)
-            if vals:
-                nums = [normalizar_numero_pt(v) for v in vals]
-                candidatos = [n for n in nums if 1 <= n <= 2000]
-                if candidatos:
-                    # Se existir mais de um candidato, nao adivinha.
-                    unicos = sorted(set(round(n, 2) for n in candidatos))
-                    if len(unicos) == 1:
-                        return unicos[0]
-                    return None
-
-    # Heuristica: valor SS imputado costuma ser montante baixo no bloco de movimento SS.
-    # Ignora montantes altos (totais pagos da SS) e procura primeiro montante entre 1 e 2000.
-    linha_ss = re.search(r"[^\n]*(?:seguranca\s+social|ss)[^\n]*", texto, flags=re.IGNORECASE)
-    if linha_ss:
-        vals = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", linha_ss.group(0))
-        nums = [normalizar_numero_pt(v) for v in vals]
-        candidatos = [n for n in nums if 1 <= n <= 2000]
-        if candidatos:
-            unicos = sorted(set(round(n, 2) for n in candidatos))
-            if len(unicos) == 1:
-                return unicos[0]
-            return None
-
-    # Fallback: no bloco SS do extrato, usar o ultimo montante da linha de movimento.
-    linha_ss = re.search(r"[^\n]*seguranca\s+social[^\n]*", texto, flags=re.IGNORECASE)
-    if linha_ss:
-        vals = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", linha_ss.group(0))
-        if vals:
-            return normalizar_numero_pt(vals[-1])
-
     return None
 
 
@@ -600,52 +539,26 @@ def extrair_imputado_seguro_colaborador(extrato_seg_pdf: Path, nome_colaborador:
                 if candidatos:
                     return candidatos[-1]
 
-    # Regra principal: valor destacado a amarelo na linha com o nome do colaborador.
-    val_amarelo_nome = extrair_valor_destacado_amarelo_com_texto(extrato_seg_pdf, nome_colaborador)
-    if val_amarelo_nome is not None:
-        return val_amarelo_nome
-
     alvo = slug(nome_colaborador)
     alvo_tokens = [t for t in alvo.split() if t]
     linhas = texto.splitlines()
-    # Fallback robusto: linha de "Afetacao ... <nome>" no extrato.
+
+    # Regra unica: linha de "Afetacao ... <nome>" no documento 12.
     for linha in linhas:
         s = slug(linha)
+        if "afetacao" not in s or "seg" not in s:
+            continue
         nome_bate = (alvo in s) if alvo else False
         if not nome_bate and alvo_tokens:
             nome_bate = all(tok in s for tok in alvo_tokens)
-        # Fallback adicional fixo para o caso de Joao Ferreira com OCR degradado.
         if not nome_bate:
-            nome_bate = ("joao" in s and "ferreira" in s)
-
-        if "afetacao" in s and nome_bate:
-            vals = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", linha)
-            if vals:
-                nums = [normalizar_numero_pt(v) for v in vals]
-                candidatos = [n for n in nums if 1 <= n <= 2000]
-                if candidatos:
-                    return candidatos[-1]
-
-    candidatos_total: list[float] = []
-    for i, linha in enumerate(linhas):
-        if alvo and alvo in slug(linha):
-            vals = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", linha)
-            if vals:
-                nums = [normalizar_numero_pt(v) for v in vals]
-                candidatos = [n for n in nums if 1 <= n <= 2000]
-                candidatos_total.extend(candidatos)
-            # Alguns PDFs partem a tabela em varias linhas; olha para as linhas seguintes.
-            bloco = " ".join(linhas[i : i + 4])
-            vals_bloco = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", bloco)
-            if vals_bloco:
-                nums = [normalizar_numero_pt(v) for v in vals_bloco]
-                candidatos = [n for n in nums if 1 <= n <= 2000]
-                candidatos_total.extend(candidatos)
-    if candidatos_total:
-        unicos = sorted(set(round(n, 2) for n in candidatos_total))
-        if len(unicos) == 1:
-            return unicos[0]
-        return None
+            continue
+        vals = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", linha)
+        if vals:
+            nums = [normalizar_numero_pt(v) for v in vals]
+            candidatos = [n for n in nums if 1 <= n <= 2000]
+            if candidatos:
+                return candidatos[-1]
     return None
 
 

@@ -11,7 +11,7 @@ import preencher_template_despesas_bec as core
 def parse_colaboradores_manual(raw: str) -> list[dict]:
     """
     Formato esperado por linha:
-    Nome;NIF;ValorBruto
+    Nome;NIF;ValorSalarioBase;ValorSubsidioRefeicao
     """
     resultados = []
     for idx, linha in enumerate(raw.splitlines(), start=1):
@@ -19,13 +19,28 @@ def parse_colaboradores_manual(raw: str) -> list[dict]:
         if not l:
             continue
         partes = [p.strip() for p in l.split(";")]
-        if len(partes) != 3:
-            raise ValueError(f"Linha {idx} invalida. Usa: Nome;NIF;ValorBruto")
-        nome, nif, bruto = partes
+        if len(partes) not in (3, 4):
+            raise ValueError(
+                f"Linha {idx} invalida. Usa: Nome;NIF;ValorSalarioBase;ValorSubsidioRefeicao"
+            )
+        nome, nif = partes[0], partes[1]
         if not (nif.isdigit() and len(nif) == 9):
             raise ValueError(f"Linha {idx}: NIF invalido ({nif}).")
-        bruto_num = float(bruto.replace(".", "").replace(",", "."))
-        resultados.append({"nome": nome, "nif": nif, "valor_bruto": bruto_num})
+        if len(partes) == 4:
+            salario_base = float(partes[2].replace(".", "").replace(",", "."))
+            subsidio_ref = float(partes[3].replace(".", "").replace(",", "."))
+            bruto_num = salario_base + subsidio_ref
+            resultados.append(
+                {
+                    "nome": nome,
+                    "nif": nif,
+                    "valor_bruto": bruto_num,
+                    "valor_subsidio_refeicao": subsidio_ref,
+                }
+            )
+        else:
+            bruto_num = float(partes[2].replace(".", "").replace(",", "."))
+            resultados.append({"nome": nome, "nif": nif, "valor_bruto": bruto_num})
     if not resultados:
         raise ValueError("Nao foram encontrados colaboradores validos no texto manual.")
     return resultados
@@ -140,11 +155,14 @@ else:
 
 ocr_lang = st.text_input("Idioma OCR (Tesseract)", value="por")
 colab_manual = st.text_area(
-    "Fallback manual de colaboradores (opcional)",
+    "Fallback manual de colaborador (opcional)",
     value="",
     height=120,
-    help="Se a leitura do recibo falhar, uma linha por colaborador: Nome;NIF;ValorBruto",
-    placeholder="Joao Ferreira;205890326;813,46",
+    help=(
+        "Se a leitura do recibo falhar, uma linha por colaborador: "
+        "Nome;NIF;ValorSalarioBase;ValorSubsidioRefeicao"
+    ),
+    placeholder="Joao Ferreira;205890326;752,26;61,20",
 )
 
 with st.expander("Fallback manual de campos (opcional)"):
@@ -155,13 +173,16 @@ with st.expander("Fallback manual de campos (opcional)"):
     ss_total = st.text_input("SS - Total", value="")
     ss_declaracao = st.text_input("SS - No Declaracao (Identificador DR)", value="")
     ss_data_doc = st.text_input("SS - Data Doc Despesa (dd/mm/aaaa)", value="")
+    ss_doc_pagamento = st.text_input("SS - No Doc Pagamento", value="")
     ss_data_pagamento = st.text_input("SS - Data Doc Pagamento (dd/mm/aaaa)", value="")
+    ss_imputado = st.text_input("SS - Imputado (11% trabalhador)", value="")
 
     seg_total = st.text_input("Seguro - Total", value="")
     seg_num_fatura = st.text_input("Seguro - No Fatura", value="")
     seg_data_doc = st.text_input("Seguro - Data Doc Despesa (dd/mm/aaaa)", value="")
     seg_doc_pagamento = st.text_input("Seguro - No Doc Pagamento", value="")
     seg_data_pagamento = st.text_input("Seguro - Data Doc Pagamento (dd/mm/aaaa)", value="")
+    seg_imputado = st.text_input("Seguro - Imputado (afetacao colaborador)", value="")
 
 
 def montar_campos_override() -> dict:
@@ -175,6 +196,10 @@ def montar_campos_override() -> dict:
         campos_override["ss_data_doc"] = ss_data_doc.strip()
     if ss_data_pagamento.strip():
         campos_override["ss_data_pagamento"] = ss_data_pagamento.strip()
+    if ss_doc_pagamento.strip():
+        campos_override["ss_doc_pagamento"] = ss_doc_pagamento.strip()
+    if ss_imputado.strip():
+        campos_override["ss_imputado"] = ss_imputado.strip()
     if (
         seg_total.strip()
         and seg_num_fatura.strip()
@@ -187,6 +212,8 @@ def montar_campos_override() -> dict:
         campos_override["seg_data_doc"] = seg_data_doc.strip()
         campos_override["seg_doc_pagamento"] = seg_doc_pagamento.strip()
         campos_override["seg_data_pagamento"] = seg_data_pagamento.strip()
+    if seg_imputado.strip():
+        campos_override["seg_imputado"] = seg_imputado.strip()
     return campos_override
 
 

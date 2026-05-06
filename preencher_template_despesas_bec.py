@@ -27,6 +27,7 @@ RUBRICA_REMUN = "632 - Remuneracoes do pessoal"
 RUBRICA_SS = "635 - Encargos sobre remuneracoes"
 RUBRICA_SEG = "636 - Seguros de acidentes no trabalho e doencas profissionais"
 NIF_SS_FIXO = "505305500"
+NIF_GENERALI_FIXO = "50094023"
 OCR_LANG = "por"
 POPPLER_PATH = ""
 
@@ -196,7 +197,20 @@ def extrair_colaboradores_recibo(recibo_pdf: Path) -> list[dict]:
         )
     if not resultados:
         raise ValueError("Nao foi possivel extrair colaboradores do recibo.")
-    return resultados
+    return deduplicar_colaboradores(resultados)
+
+
+def deduplicar_colaboradores(colaboradores: list[dict]) -> list[dict]:
+    unicos: dict[tuple[str, str], dict] = {}
+    for c in colaboradores:
+        chave = (str(c.get("nif", "")).strip(), slug(str(c.get("nome", ""))))
+        if chave not in unicos:
+            unicos[chave] = c
+            continue
+        # Em caso de OCR duplicado, mantem o maior valor bruto.
+        if float(c.get("valor_bruto", 0) or 0) > float(unicos[chave].get("valor_bruto", 0) or 0):
+            unicos[chave] = c
+    return list(unicos.values())
 
 
 def extrair_doc_pagamento_vencimento(extrato_pdf: Path, mes_ref: str) -> tuple[str, datetime]:
@@ -320,6 +334,61 @@ def extrair_data_valor_ss(extrato_ss_pdf: Path) -> datetime:
     return normalizar_data(qualquer.group(1))
 
 
+def extrair_doc_pagamento_ss(extrato_ss_pdf: Path) -> str:
+    texto = ler_pdf_texto(extrato_ss_pdf)
+    m = re.search(r"\d{2}/\d{2}/\d{4}\s+([A-Za-z0-9][A-Za-z0-9/\-\. ]{2,40})", texto)
+    if m:
+        return re.sub(r"\s+", " ", m.group(1)).strip()
+    return "Pagamento SS"
+
+
+def extrair_imputado_ss_extrato(extrato_ss_pdf: Path) -> float | None:
+    texto = ler_pdf_texto(extrato_ss_pdf)
+    if not texto.strip():
+        return None
+
+    # Preferir linhas com pistas de quota/trabalhador/11% no extrato.
+    for linha in texto.splitlines():
+        s = slug(linha)
+        if any(k in s for k in ("quota", "trabalhador", "11")):
+            vals = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", linha)
+            if vals:
+                return normalizar_numero_pt(vals[-1])
+
+    # Fallback: no bloco SS do extrato, usar o ultimo montante da linha de movimento.
+    linha_ss = re.search(r"[^\n]*seguranca\s+social[^\n]*", texto, flags=re.IGNORECASE)
+    if linha_ss:
+        vals = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", linha_ss.group(0))
+        if vals:
+            return normalizar_numero_pt(vals[-1])
+
+    return None
+
+
+def calcular_imputado_ss_11(ss_pdf: Path) -> float | None:
+    texto = ler_pdf_texto(ss_pdf)
+    # Captura linhas do tipo "Remuneracao X ... 123,45".
+    valores = re.findall(r"Remunera\w+\s+[A-Z]\b[^\n]*?(\d{1,3}(?:\.\d{3})*,\d{2})", texto, flags=re.IGNORECASE)
+    if not valores:
+        return None
+    total_remun = sum(normalizar_numero_pt(v) for v in valores)
+    return round(total_remun * 0.11, 2)
+
+
+def extrair_imputado_seguro_colaborador(extrato_seg_pdf: Path, nome_colaborador: str) -> float | None:
+    texto = ler_pdf_texto(extrato_seg_pdf)
+    if not texto.strip() or not nome_colaborador.strip():
+        return None
+
+    alvo = slug(nome_colaborador)
+    for linha in texto.splitlines():
+        if alvo and alvo in slug(linha):
+            vals = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", linha)
+            if vals:
+                return normalizar_numero_pt(vals[-1])
+    return None
+
+
 def extrair_seguro(fatura_pdf: Path, extrato_seg_pdf: Path) -> tuple[float, str, datetime, str, datetime]:
     texto_fat = ler_pdf_texto(fatura_pdf)
     numero_fat = None
@@ -429,8 +498,10 @@ def construir_dataframe_linhas(
     mes_label = f"{nome_mes_pt(mes_int)} {ano_ref}"
     data_recibo = ultimo_dia_util_mes(ano_int, mes_int)
 
-    colaboradores = colaboradores_override if colaboradores_override is not None else extrair_colaboradores_recibo(
-        ficheiros["recibo"]
+    colaboradores = (
+        deduplicar_colaboradores(colaboradores_override)
+        if colaboradores_override is not None
+        else extrair_colaboradores_recibo(ficheiros["recibo"])
     )
     if campos_override.get("venc_doc_pagamento") and campos_override.get("venc_data_pagamento"):
         doc_pag_venc = str(campos_override["venc_doc_pagamento"])
@@ -453,6 +524,10 @@ def construir_dataframe_linhas(
         data_pag_ss = garantir_data(campos_override["ss_data_pagamento"])
     else:
         data_pag_ss = extrair_data_valor_ss(ficheiros["extrato_ss"])
+    if campos_override.get("ss_doc_pagamento"):
+        no_pag_ss = str(campos_override["ss_doc_pagamento"])
+    else:
+        no_pag_ss = extrair_doc_pagamento_ss(ficheiros["extrato_ss"])
 
     if (
         campos_override.get("seg_total") is not None
@@ -471,8 +546,31 @@ def construir_dataframe_linhas(
             ficheiros["fatura_seg"], ficheiros["extrato_seg"]
         )
 
+    # Imputado SS: regra de negocio -> tentar ler do doc 9 primeiro.
+    imputado_ss = extrair_imputado_ss_extrato(ficheiros["extrato_ss"])
+    if imputado_ss is None:
+        if campos_override.get("ss_imputado") is not None:
+            imputado_ss = garantir_float(campos_override["ss_imputado"])
+        else:
+            raise ValueError(
+                "Nao foi possivel extrair 'SS imputado' do documento 9. "
+                "Preenche o campo manual 'SS - Imputado'."
+            )
+
+    # Imputado Seguro: preferir override; senao tentar extrair por nome no extrato; fallback no total.
+    if campos_override.get("seg_imputado") is not None:
+        imputado_seg = garantir_float(campos_override["seg_imputado"])
+    else:
+        nome_ref = colaboradores[0]["nome"] if colaboradores else ""
+        imputado_seg = extrair_imputado_seguro_colaborador(ficheiros["extrato_seg"], nome_ref)
+        if imputado_seg is None:
+            imputado_seg = total_seg
+
     linhas = []
     for c in colaboradores:
+        bruto = float(c["valor_bruto"])
+        subsidio_ref = float(c.get("valor_subsidio_refeicao", 0) or 0)
+        imputado_remun = round(bruto - subsidio_ref, 2)
         linhas.append(
             {
                 "categoria custo": CATEGORIA_CUSTO,
@@ -483,17 +581,17 @@ def construir_dataframe_linhas(
                 "nif fornecedor": c["nif"],
                 "nome fornecedor": c["nome"],
                 "pais fornecedor": "Portugal",
-                "total doc despesa": c["valor_bruto"],
+                "total doc despesa": bruto,
                 "mapa de investimentos": 1,
                 "rubrica": RUBRICA_REMUN,
-                "imputado doc despesa": c["valor_bruto"],
-                "elegivel doc despesa": c["valor_bruto"],
+                "imputado doc despesa": imputado_remun,
+                "elegivel doc despesa": imputado_remun,
                 "doc pagamento": "Extrato Bancario",
                 "n doc pagamento": doc_pag_venc,
                 "data doc pagamento": data_pag_venc,
-                "total doc pagamento": c["valor_bruto"],
-                "imputado doc pagamento": c["valor_bruto"],
-                "elegivel doc pagamento": c["valor_bruto"],
+                "total doc pagamento": bruto,
+                "imputado doc pagamento": imputado_remun,
+                "elegivel doc pagamento": imputado_remun,
             }
         )
 
@@ -510,14 +608,14 @@ def construir_dataframe_linhas(
             "total doc despesa": total_ss,
             "mapa de investimentos": 1,
             "rubrica": RUBRICA_SS,
-            "imputado doc despesa": total_ss,
-            "elegivel doc despesa": total_ss,
+            "imputado doc despesa": imputado_ss,
+            "elegivel doc despesa": imputado_ss,
             "doc pagamento": "Extrato Bancario",
-            "n doc pagamento": f"Pag SS {ano_ref}-{mes_ref}",
+            "n doc pagamento": no_pag_ss,
             "data doc pagamento": data_pag_ss,
             "total doc pagamento": total_ss,
-            "imputado doc pagamento": total_ss,
-            "elegivel doc pagamento": total_ss,
+            "imputado doc pagamento": imputado_ss,
+            "elegivel doc pagamento": imputado_ss,
         }
     )
 
@@ -528,20 +626,20 @@ def construir_dataframe_linhas(
             "descricao": f"Seguro AT {mes_label}",
             "data doc despesa": data_pag_seg,
             "n doc despesa": no_fat_seg,
-            "nif fornecedor": "",
+            "nif fornecedor": NIF_GENERALI_FIXO,
             "nome fornecedor": "Seguro Acidentes Trabalho",
             "pais fornecedor": "Portugal",
             "total doc despesa": total_seg,
             "mapa de investimentos": 1,
             "rubrica": RUBRICA_SEG,
-            "imputado doc despesa": total_seg,
-            "elegivel doc despesa": total_seg,
+            "imputado doc despesa": imputado_seg,
+            "elegivel doc despesa": imputado_seg,
             "doc pagamento": "Extrato Bancario",
             "n doc pagamento": no_pag_seg,
             "data doc pagamento": data_pag_seg,
             "total doc pagamento": total_seg,
-            "imputado doc pagamento": total_seg,
-            "elegivel doc pagamento": total_seg,
+            "imputado doc pagamento": imputado_seg,
+            "elegivel doc pagamento": imputado_seg,
         }
     )
 

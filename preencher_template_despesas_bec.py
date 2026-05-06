@@ -359,10 +359,26 @@ def extrair_doc_pagamento_ss(extrato_ss_pdf: Path) -> str:
     return "Pagamento SS"
 
 
-def extrair_imputado_ss_extrato(extrato_ss_pdf: Path) -> float | None:
+def extrair_imputado_ss_extrato(extrato_ss_pdf: Path, ano_ref: str | None = None, mes_ref: str | None = None) -> float | None:
     texto = ler_pdf_texto(extrato_ss_pdf)
     if not texto.strip():
         return None
+
+    # Prioridade maxima: linha do movimento mensal "Processamento Salarios AAAA.MM"
+    if ano_ref and mes_ref:
+        padrao_mes = re.compile(
+            rf"[^\n]*Processamento\s+Sal\S*\s+{re.escape(ano_ref)}\.\s*{re.escape(mes_ref)}[^\n]*",
+            flags=re.IGNORECASE,
+        )
+        for linha in texto.splitlines():
+            if padrao_mes.search(linha):
+                vals = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", linha)
+                if vals:
+                    nums = [normalizar_numero_pt(v) for v in vals]
+                    candidatos = [n for n in nums if 1 <= n <= 2000]
+                    if candidatos:
+                        # Nestas linhas, o imputado costuma ser o menor montante da linha.
+                        return min(candidatos)
 
     # Preferir linhas com pistas de quota/trabalhador/11% no extrato.
     for linha in texto.splitlines():
@@ -370,7 +386,11 @@ def extrair_imputado_ss_extrato(extrato_ss_pdf: Path) -> float | None:
         if any(k in s for k in ("quota", "trabalhador", "11")):
             vals = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", linha)
             if vals:
-                return normalizar_numero_pt(vals[-1])
+                nums = [normalizar_numero_pt(v) for v in vals]
+                candidatos = [n for n in nums if 1 <= n <= 2000]
+                if candidatos:
+                    return candidatos[-1]
+                return min(nums)
 
     # Heuristica: valor SS imputado costuma ser montante baixo no bloco de movimento SS.
     # Ignora montantes altos (totais pagos da SS) e procura primeiro montante entre 1 e 2000.
@@ -408,11 +428,21 @@ def extrair_imputado_seguro_colaborador(extrato_seg_pdf: Path, nome_colaborador:
         return None
 
     alvo = slug(nome_colaborador)
-    for linha in texto.splitlines():
+    linhas = texto.splitlines()
+    for i, linha in enumerate(linhas):
         if alvo and alvo in slug(linha):
             vals = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", linha)
             if vals:
                 return normalizar_numero_pt(vals[-1])
+            # Alguns PDFs partem a tabela em varias linhas; olha para as linhas seguintes.
+            bloco = " ".join(linhas[i : i + 4])
+            vals_bloco = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", bloco)
+            if vals_bloco:
+                nums = [normalizar_numero_pt(v) for v in vals_bloco]
+                candidatos = [n for n in nums if 1 <= n <= 2000]
+                if candidatos:
+                    return candidatos[-1]
+                return nums[-1]
     return None
 
 
@@ -579,7 +609,7 @@ def construir_dataframe_linhas(
         )
 
     # Imputado SS: regra de negocio -> tentar ler do doc 9 primeiro.
-    imputado_ss = extrair_imputado_ss_extrato(ficheiros["extrato_ss"])
+    imputado_ss = extrair_imputado_ss_extrato(ficheiros["extrato_ss"], ano_ref=ano_ref, mes_ref=mes_ref)
     if imputado_ss is None:
         if campos_override.get("ss_imputado") is not None:
             imputado_ss = garantir_float(campos_override["ss_imputado"])
@@ -589,14 +619,17 @@ def construir_dataframe_linhas(
                 "Preenche o campo manual 'SS - Imputado'."
             )
 
-    # Imputado Seguro: preferir override; senao tentar extrair por nome no extrato; fallback no total.
+    # Imputado Seguro: tentar extrair por nome no extrato (doc 12); fallback manual.
     if campos_override.get("seg_imputado") is not None:
         imputado_seg = garantir_float(campos_override["seg_imputado"])
     else:
         nome_ref = colaboradores[0]["nome"] if colaboradores else ""
         imputado_seg = extrair_imputado_seguro_colaborador(ficheiros["extrato_seg"], nome_ref)
         if imputado_seg is None:
-            imputado_seg = total_seg
+            raise ValueError(
+                "Nao foi possivel extrair 'Seguro imputado' (afetacao do colaborador) do documento 12. "
+                "Preenche o campo manual 'Seguro - Imputado'."
+            )
 
     linhas = []
     for c in colaboradores:

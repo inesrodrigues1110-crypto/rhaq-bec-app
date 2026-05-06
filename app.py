@@ -11,7 +11,7 @@ import preencher_template_despesas_bec as core
 def parse_colaboradores_manual(raw: str) -> list[dict]:
     """
     Formato esperado por linha:
-    Nome;NIF;ValorSalarioBase;ValorSubsidioRefeicao
+    Nome;NIF;ValorBruto;ValorSubsidioRefeicao
     """
     resultados = []
     for idx, linha in enumerate(raw.splitlines(), start=1):
@@ -21,20 +21,19 @@ def parse_colaboradores_manual(raw: str) -> list[dict]:
         partes = [p.strip() for p in l.split(";")]
         if len(partes) not in (3, 4):
             raise ValueError(
-                f"Linha {idx} invalida. Usa: Nome;NIF;ValorSalarioBase;ValorSubsidioRefeicao"
+                f"Linha {idx} invalida. Usa: Nome;NIF;ValorBruto;ValorSubsidioRefeicao"
             )
         nome, nif = partes[0], partes[1]
         if not (nif.isdigit() and len(nif) == 9):
             raise ValueError(f"Linha {idx}: NIF invalido ({nif}).")
         if len(partes) == 4:
-            salario_base = float(partes[2].replace(".", "").replace(",", "."))
+            bruto_manual = float(partes[2].replace(".", "").replace(",", "."))
             subsidio_ref = float(partes[3].replace(".", "").replace(",", "."))
-            bruto_num = salario_base + subsidio_ref
             resultados.append(
                 {
                     "nome": nome,
                     "nif": nif,
-                    "valor_bruto": bruto_num,
+                    "valor_bruto": bruto_manual,
                     "valor_subsidio_refeicao": subsidio_ref,
                 }
             )
@@ -160,9 +159,9 @@ colab_manual = st.text_area(
     height=120,
     help=(
         "Se a leitura do recibo falhar, uma linha por colaborador: "
-        "Nome;NIF;ValorSalarioBase;ValorSubsidioRefeicao"
+        "Nome;NIF;ValorBruto;ValorSubsidioRefeicao"
     ),
-    placeholder="Joao Ferreira;205890326;752,26;61,20",
+    placeholder="Joao Ferreira;205890326;813,46;61,20",
 )
 
 with st.expander("Fallback manual de campos (opcional)"):

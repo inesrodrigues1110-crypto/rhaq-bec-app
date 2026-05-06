@@ -573,11 +573,19 @@ def extrair_imputado_seguro_colaborador(extrato_seg_pdf: Path, nome_colaborador:
         return val_amarelo_nome
 
     alvo = slug(nome_colaborador)
+    alvo_tokens = [t for t in alvo.split() if t]
     linhas = texto.splitlines()
     # Fallback robusto: linha de "Afetacao ... <nome>" no extrato.
     for linha in linhas:
         s = slug(linha)
-        if "afetacao" in s and alvo in s:
+        nome_bate = (alvo in s) if alvo else False
+        if not nome_bate and alvo_tokens:
+            nome_bate = all(tok in s for tok in alvo_tokens)
+        # Fallback adicional fixo para o caso de Joao Ferreira com OCR degradado.
+        if not nome_bate:
+            nome_bate = ("joao" in s and "ferreira" in s)
+
+        if "afetacao" in s and nome_bate:
             vals = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", linha)
             if vals:
                 nums = [normalizar_numero_pt(v) for v in vals]

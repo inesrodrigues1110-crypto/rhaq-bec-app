@@ -412,7 +412,12 @@ def extrair_doc_pagamento_generico(
     Extrai No/Data de um comprovativo de pagamento (docs 2, 8, 11).
     Prioriza referencia bancaria tipo "Millenium - 2025/005".
     """
-    texto = ler_pdf_texto_auto(pdf_path, OCR_LANG)
+    # Em ambientes sem Tesseract (ex.: Render), nao deve bloquear.
+    # Tenta OCR e, se falhar, continua com texto simples.
+    try:
+        texto = ler_pdf_texto_auto(pdf_path, OCR_LANG)
+    except Exception:
+        texto = ler_pdf_texto(pdf_path)
     if not texto.strip():
         return None
 

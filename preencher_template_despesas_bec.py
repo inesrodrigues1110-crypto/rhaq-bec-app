@@ -84,6 +84,130 @@ def ler_pdf_texto_auto(pdf_path: Path, ocr_lang: str = OCR_LANG) -> str:
     return ler_pdf_texto_com_ocr(pdf_path, lang=ocr_lang)
 
 
+def _is_yellow_color(color) -> bool:
+    if not color:
+        return False
+    try:
+        # RGB normalizado [0..1]
+        if isinstance(color, tuple) and len(color) >= 3:
+            r, g, b = float(color[0]), float(color[1]), float(color[2])
+            return r >= 0.75 and g >= 0.7 and b <= 0.45
+        # CMYK [0..1] (amarelo costuma ter Y alto e C/M/K baixos)
+        if isinstance(color, tuple) and len(color) == 4:
+            c, m, y, k = [float(v) for v in color]
+            return y >= 0.45 and c <= 0.35 and m <= 0.35 and k <= 0.35
+    except Exception:
+        return False
+    return False
+
+
+def extrair_valor_destacado_amarelo(pdf_path: Path) -> float | None:
+    """
+    Tenta ler o valor monetario na linha destacada a amarelo no PDF.
+    Usa objetos graficos (rects) + palavras sobrepostas.
+    """
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            candidatos: list[float] = []
+            for page in pdf.pages:
+                rects = page.rects or []
+                words = page.extract_words() or []
+                if not rects or not words:
+                    continue
+
+                for r in rects:
+                    if not _is_yellow_color(r.get("non_stroking_color")):
+                        continue
+
+                    # Expande um pouco para apanhar a linha toda.
+                    rx0 = float(r.get("x0", 0)) - 8
+                    rx1 = float(r.get("x1", 0)) + 8
+                    rtop = float(r.get("top", 0)) - 3
+                    rbot = float(r.get("bottom", 0)) + 3
+
+                    linha_words = []
+                    for w in words:
+                        wx0, wx1 = float(w["x0"]), float(w["x1"])
+                        wtop, wbot = float(w["top"]), float(w["bottom"])
+                        sobrepoe_x = wx1 >= rx0 and wx0 <= rx1
+                        sobrepoe_y = wbot >= rtop and wtop <= rbot
+                        if sobrepoe_x and sobrepoe_y:
+                            linha_words.append(w)
+
+                    if not linha_words:
+                        continue
+
+                    linha_words.sort(key=lambda w: (w["top"], w["x0"]))
+                    linha_txt = " ".join(w["text"] for w in linha_words)
+                    vals = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", linha_txt)
+                    for v in vals:
+                        n = normalizar_numero_pt(v)
+                        if 1 <= n <= 2000:
+                            candidatos.append(n)
+
+            if candidatos:
+                # Em caso de varios matches amarelos, prefere o ultimo da leitura.
+                return round(candidatos[-1], 2)
+    except Exception:
+        return None
+    return None
+
+
+def extrair_valor_destacado_amarelo_com_texto(pdf_path: Path, texto_alvo: str) -> float | None:
+    """
+    Extrai valor da linha destacada a amarelo que contenha o texto alvo.
+    Ex.: "Joao Ferreira" no documento 12.
+    """
+    alvo_slug = slug(texto_alvo)
+    if not alvo_slug:
+        return None
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            candidatos: list[float] = []
+            for page in pdf.pages:
+                rects = page.rects or []
+                words = page.extract_words() or []
+                if not rects or not words:
+                    continue
+
+                for r in rects:
+                    if not _is_yellow_color(r.get("non_stroking_color")):
+                        continue
+
+                    rx0 = float(r.get("x0", 0)) - 8
+                    rx1 = float(r.get("x1", 0)) + 8
+                    rtop = float(r.get("top", 0)) - 3
+                    rbot = float(r.get("bottom", 0)) + 3
+
+                    linha_words = []
+                    for w in words:
+                        wx0, wx1 = float(w["x0"]), float(w["x1"])
+                        wtop, wbot = float(w["top"]), float(w["bottom"])
+                        sobrepoe_x = wx1 >= rx0 and wx0 <= rx1
+                        sobrepoe_y = wbot >= rtop and wtop <= rbot
+                        if sobrepoe_x and sobrepoe_y:
+                            linha_words.append(w)
+
+                    if not linha_words:
+                        continue
+
+                    linha_words.sort(key=lambda w: (w["top"], w["x0"]))
+                    linha_txt = " ".join(w["text"] for w in linha_words)
+                    if alvo_slug not in slug(linha_txt):
+                        continue
+
+                    vals = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", linha_txt)
+                    for v in vals:
+                        n = normalizar_numero_pt(v)
+                        if 1 <= n <= 2000:
+                            candidatos.append(n)
+            if candidatos:
+                return round(candidatos[-1], 2)
+    except Exception:
+        return None
+    return None
+
+
 def normalizar_numero_pt(valor_str: str) -> float:
     limpo = re.sub(r"[^\d,.\-]", "", valor_str).replace(".", "").replace(",", ".")
     return float(limpo)
@@ -360,6 +484,11 @@ def extrair_doc_pagamento_ss(extrato_ss_pdf: Path) -> str:
 
 
 def extrair_imputado_ss_extrato(extrato_ss_pdf: Path, ano_ref: str | None = None, mes_ref: str | None = None) -> float | None:
+    # Regra principal: valor da linha destacada a amarelo no documento 9.
+    val_amarelo = extrair_valor_destacado_amarelo(extrato_ss_pdf)
+    if val_amarelo is not None:
+        return val_amarelo
+
     texto = ler_pdf_texto(extrato_ss_pdf)
     if not texto.strip():
         return None
@@ -370,15 +499,20 @@ def extrair_imputado_ss_extrato(extrato_ss_pdf: Path, ano_ref: str | None = None
             rf"[^\n]*Processamento\s+Sal\S*\s+{re.escape(ano_ref)}\.\s*{re.escape(mes_ref)}[^\n]*",
             flags=re.IGNORECASE,
         )
+        candidatos_mes: list[float] = []
         for linha in texto.splitlines():
             if padrao_mes.search(linha):
                 vals = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", linha)
                 if vals:
                     nums = [normalizar_numero_pt(v) for v in vals]
                     candidatos = [n for n in nums if 1 <= n <= 2000]
-                    if candidatos:
-                        # Nestas linhas, o imputado costuma ser o menor montante da linha.
-                        return min(candidatos)
+                    candidatos_mes.extend(candidatos)
+        if candidatos_mes:
+            # Evita adivinhar quando ha varios montantes possiveis no mesmo mes.
+            unicos = sorted(set(round(n, 2) for n in candidatos_mes))
+            if len(unicos) == 1:
+                return unicos[0]
+            return None
 
     # Preferir linhas com pistas de quota/trabalhador/11% no extrato.
     for linha in texto.splitlines():
@@ -389,8 +523,11 @@ def extrair_imputado_ss_extrato(extrato_ss_pdf: Path, ano_ref: str | None = None
                 nums = [normalizar_numero_pt(v) for v in vals]
                 candidatos = [n for n in nums if 1 <= n <= 2000]
                 if candidatos:
-                    return candidatos[-1]
-                return min(nums)
+                    # Se existir mais de um candidato, nao adivinha.
+                    unicos = sorted(set(round(n, 2) for n in candidatos))
+                    if len(unicos) == 1:
+                        return unicos[0]
+                    return None
 
     # Heuristica: valor SS imputado costuma ser montante baixo no bloco de movimento SS.
     # Ignora montantes altos (totais pagos da SS) e procura primeiro montante entre 1 e 2000.
@@ -400,7 +537,10 @@ def extrair_imputado_ss_extrato(extrato_ss_pdf: Path, ano_ref: str | None = None
         nums = [normalizar_numero_pt(v) for v in vals]
         candidatos = [n for n in nums if 1 <= n <= 2000]
         if candidatos:
-            return candidatos[-1]
+            unicos = sorted(set(round(n, 2) for n in candidatos))
+            if len(unicos) == 1:
+                return unicos[0]
+            return None
 
     # Fallback: no bloco SS do extrato, usar o ultimo montante da linha de movimento.
     linha_ss = re.search(r"[^\n]*seguranca\s+social[^\n]*", texto, flags=re.IGNORECASE)
@@ -427,22 +567,33 @@ def extrair_imputado_seguro_colaborador(extrato_seg_pdf: Path, nome_colaborador:
     if not texto.strip() or not nome_colaborador.strip():
         return None
 
+    # Regra principal: valor destacado a amarelo na linha com o nome do colaborador.
+    val_amarelo_nome = extrair_valor_destacado_amarelo_com_texto(extrato_seg_pdf, nome_colaborador)
+    if val_amarelo_nome is not None:
+        return val_amarelo_nome
+
     alvo = slug(nome_colaborador)
     linhas = texto.splitlines()
+    candidatos_total: list[float] = []
     for i, linha in enumerate(linhas):
         if alvo and alvo in slug(linha):
             vals = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", linha)
             if vals:
-                return normalizar_numero_pt(vals[-1])
+                nums = [normalizar_numero_pt(v) for v in vals]
+                candidatos = [n for n in nums if 1 <= n <= 2000]
+                candidatos_total.extend(candidatos)
             # Alguns PDFs partem a tabela em varias linhas; olha para as linhas seguintes.
             bloco = " ".join(linhas[i : i + 4])
             vals_bloco = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", bloco)
             if vals_bloco:
                 nums = [normalizar_numero_pt(v) for v in vals_bloco]
                 candidatos = [n for n in nums if 1 <= n <= 2000]
-                if candidatos:
-                    return candidatos[-1]
-                return nums[-1]
+                candidatos_total.extend(candidatos)
+    if candidatos_total:
+        unicos = sorted(set(round(n, 2) for n in candidatos_total))
+        if len(unicos) == 1:
+            return unicos[0]
+        return None
     return None
 
 

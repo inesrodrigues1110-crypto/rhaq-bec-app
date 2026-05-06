@@ -221,13 +221,11 @@ def extrair_ss_folhas(ss_pdf: Path) -> tuple[float, str, datetime]:
     texto = ler_pdf_texto(ss_pdf)
     texto_slug = slug(texto)
     decl = re.search(r"Identificador\s+DR\s+(\d+)", texto, flags=re.IGNORECASE)
-    if not decl:
-        raise ValueError("Nao foi possivel extrair o No da Declaracao da SS.")
 
     total_valor = None
     # Caso mais direto: "Total de contribuicoes: 16941,86"
     total_direto = re.search(
-        r"Total de contribui[a-zA-Z]+[:\s]+([\d\.\s]+,\d{2})",
+        r"Total de contribui[^\n:]*[:\s]+([\d\.\s]+,\d{2})",
         texto,
         flags=re.IGNORECASE,
     )
@@ -247,7 +245,7 @@ def extrair_ss_folhas(ss_pdf: Path) -> tuple[float, str, datetime]:
     # Fallback: linha com dois valores (remuneracoes e contribuicoes) -> usar ultimo valor.
     if total_valor is None:
         linha_resumo = re.search(
-            r"Total de Remunera[a-zA-Z]+/Contribui[a-zA-Z]+[^\n]*",
+            r"Total de Remunera[^\n]*Contribui[^\n]*",
             texto,
             flags=re.IGNORECASE,
         )
@@ -278,14 +276,16 @@ def extrair_ss_folhas(ss_pdf: Path) -> tuple[float, str, datetime]:
         if bloco:
             total_valor = normalizar_numero_pt(bloco.group(1))
 
-    # Ultimo fallback: no bloco "extrato de resumo", usa o ultimo montante monetario relevante.
+    # Ultimo fallback: no bloco "extrato de resumo", usa a linha com "contribui" e o ultimo montante.
     if total_valor is None:
         resumo_ini = texto_slug.find("extrato de resumo")
         if resumo_ini != -1:
-            resumo = texto[resumo_ini : min(len(texto), resumo_ini + 1500)]
-            valores = re.findall(r"(\d{1,3}(?:\.\d{3})*,\d{2})", resumo)
-            if valores:
-                total_valor = normalizar_numero_pt(valores[-1])
+            resumo = texto[resumo_ini : min(len(texto), resumo_ini + 2500)]
+            linha_contrib = re.search(r"[^\n]*contribui[^\n]*", resumo, flags=re.IGNORECASE)
+            if linha_contrib:
+                valores = re.findall(r"(\d{1,3}(?:\.\d{3})*,\d{2})", linha_contrib.group(0))
+                if valores:
+                    total_valor = normalizar_numero_pt(valores[-1])
 
     if total_valor is None:
         raise ValueError("Nao foi possivel extrair o valor total da SS.")
@@ -294,7 +294,19 @@ def extrair_ss_folhas(ss_pdf: Path) -> tuple[float, str, datetime]:
     if not data:
         raise ValueError("Nao foi possivel extrair a data da declaracao SS.")
 
-    return total_valor, decl.group(1), normalizar_data(data.group(1))
+    # Preferencia de No Doc Despesa no formato do exemplo: DMR MM/AAAA.
+    ano_mes = re.search(r"Ano/M\S+s de refer\S+ncia[:\s]+(20\d{2})[/-](\d{2})", texto, flags=re.IGNORECASE)
+    if not ano_mes:
+        ano_mes = re.search(r"\b(20\d{2})[-/](\d{2})\b", texto)
+
+    if ano_mes:
+        doc_despesa = f"DMR {ano_mes.group(2)}/{ano_mes.group(1)}"
+    elif decl:
+        doc_despesa = f"DR {decl.group(1)}"
+    else:
+        doc_despesa = "DMR"
+
+    return total_valor, doc_despesa, normalizar_data(data.group(1))
 
 
 def extrair_data_valor_ss(extrato_ss_pdf: Path) -> datetime:

@@ -1,6 +1,6 @@
 # App web para preencher TemplateDespesasBEC
 
-Esta app permite carregar os PDFs de um mes e gerar automaticamente o `TemplateDespesasBEC.xlsx` preenchido.
+Esta app permite carregar os PDFs de um mes (ou varios meses por ZIP) e gerar automaticamente o `TemplateDespesasBEC.xlsx` preenchido.
 
 ## 1) Publicar no Streamlit Cloud
 
@@ -22,16 +22,21 @@ Esta app permite carregar os PDFs de um mes e gerar automaticamente o `TemplateD
 ## 3) Como usar
 
 1. Carregar o ficheiro template `.xlsx`.
-2. Carregar os PDFs do mes:
+2. Escolher um modo:
+   - `Um mes (PDFs em lista)`, ou
+   - `Varios meses (ZIP)`.
+3. Se for um mes, carregar os PDFs:
    - `1. Recibo ...pdf`
    - `3. Extrato contabilistico vencimento...pdf`
    - `7. Folhas de Remuneracao SS.pdf`
    - `9. Extrato contabilistico SS.pdf`
    - `10. Fatura Seguro AT...pdf`
    - `12. Extrato contabilistico Seguro.pdf`
-3. Confirmar nome do mes (ex: `maio`).
-4. Clicar em **Processar e gerar Excel**.
-5. Fazer download do ficheiro final.
+4. Se for varios meses, carregar um ou mais ZIP:
+   - opcao A: 1 ZIP com subpastas (`5. Maio`, `6. Junho`, `7. Julho`, ...)
+   - opcao B: varios ZIPs (`maio.zip`, `junho.zip`, `julho.zip`) com PDFs na raiz
+5. Clicar em **Processar e gerar Excel**.
+6. Fazer download do ficheiro final.
 
 ## 4) Execucao local (opcional)
 

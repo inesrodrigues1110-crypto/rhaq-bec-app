@@ -815,7 +815,17 @@ def mapear_ficheiros(pasta_mes: Path) -> dict:
         elif n.startswith("12 extrato") and "seguro" in n:
             mapa["extrato_seg"] = f
 
-    obrigatorios = ["recibo", "extrato_venc", "folhas_ss", "extrato_ss", "fatura_seg", "extrato_seg"]
+    obrigatorios = [
+        "recibo",
+        "pag_venc",
+        "extrato_venc",
+        "folhas_ss",
+        "pag_ss",
+        "extrato_ss",
+        "fatura_seg",
+        "pag_seg",
+        "extrato_seg",
+    ]
     falta = [k for k in obrigatorios if k not in mapa]
     if falta:
         raise FileNotFoundError(f"Ficheiros em falta: {', '.join(falta)}")

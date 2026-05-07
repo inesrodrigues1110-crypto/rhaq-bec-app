@@ -22,10 +22,10 @@ except Exception:
     pytesseract = None
 
 
-CATEGORIA_CUSTO = "2.3.3 - Apoios diretos a contratacao"
-RUBRICA_REMUN = "632 - Remuneracoes do pessoal"
-RUBRICA_SS = "635 - Encargos sobre remuneracoes"
-RUBRICA_SEG = "636 - Seguros de acidentes no trabalho e doencas profissionais"
+CATEGORIA_CUSTO = "2.3.3 - Apoios diretos à contratação"
+RUBRICA_REMUN = "632 - Remunerações do pessoal"
+RUBRICA_SS = "635 - Encargos sobre remunerações"
+RUBRICA_SEG = "636 - Seguros de acidentes no trabalho e doenças profissionais"
 NIF_SS_FIXO = "505305500"
 NIF_GENERALI_FIXO = "500940231"
 OCR_LANG = "por"
@@ -362,6 +362,34 @@ def extrair_colaboradores_recibo(recibo_pdf: Path) -> list[dict]:
     if not resultados:
         raise ValueError("Nao foi possivel extrair colaboradores do recibo.")
     return deduplicar_colaboradores(resultados)
+
+
+def extrair_meta_recibo(recibo_pdf: Path) -> tuple[str, datetime | None]:
+    texto = ler_pdf_texto_auto(recibo_pdf, OCR_LANG)
+    if not texto.strip():
+        return "Recibo Vencimento", None
+
+    doc_no = None
+    data_doc = None
+
+    padrao_doc = [
+        r"(?:Recibo|N[.\s]*o\s*Recibo|N[.\s]*Doc)\s*[:\-]?\s*([A-Za-z0-9/\-]{4,})",
+        r"(?:Documento)\s*[:\-]?\s*([A-Za-z0-9/\-]{4,})",
+    ]
+    for p in padrao_doc:
+        m = re.search(p, texto, flags=re.IGNORECASE)
+        if m:
+            doc_no = m.group(1).strip()
+            break
+
+    m_data = re.search(r"(\d{2}/\d{2}/\d{4}|\d{4}-\d{2}-\d{2})", texto)
+    if m_data:
+        try:
+            data_doc = normalizar_data(m_data.group(1))
+        except Exception:
+            data_doc = None
+
+    return (doc_no or "Recibo Vencimento"), data_doc
 
 
 def deduplicar_colaboradores(colaboradores: list[dict]) -> list[dict]:
@@ -956,43 +984,47 @@ def construir_dataframe_linhas(
     lanc_seg = extrair_lancamento_seguro(ficheiros["extrato_seg"], nome_ref_lanc)
     lanc_venc = extrair_lancamento_vencimento(ficheiros["extrato_venc"], ano_ref=ano_ref, mes_ref=mes_ref)
 
-    linhas = []
-    for c in colaboradores:
-        bruto = float(c["valor_bruto"])
-        subsidio_ref = float(c.get("valor_subsidio_refeicao", 0) or 0)
-        imputado_remun = round(bruto - subsidio_ref, 2)
-        linhas.append(
-            {
-                "categoria custo": CATEGORIA_CUSTO,
-                "doc despesa": "Remuneracoes",
-                "descricao": f"Recibo de vencimento {c['nome']} - {mes_label}",
-                "data doc despesa": data_recibo,
-                "n doc despesa": "Recibo Vencimento",
-                "nif fornecedor": c["nif"],
-                "nome fornecedor": c["nome"],
-                "pais fornecedor": "Portugal",
-                "total doc despesa": bruto,
-                "mapa de investimentos": 1,
-                "rubrica": RUBRICA_REMUN,
-                "n lancamento contabilistico": lanc_venc,
-                "imputado doc despesa": imputado_remun,
-                "elegivel doc despesa": imputado_remun,
-                "doc pagamento": "Extrato Bancario",
-                "n doc pagamento": doc_pag_venc,
-                "data doc pagamento": data_pag_venc,
-                "total doc pagamento": bruto,
-                "imputado doc pagamento": imputado_remun,
-                "elegivel doc pagamento": imputado_remun,
-            }
-        )
+    if not colaboradores:
+        raise ValueError("Nao foi possivel identificar colaborador no recibo (documento 1).")
+    colaborador_ref = colaboradores[0]
+    bruto = float(colaborador_ref["valor_bruto"])
+    subsidio_ref = float(colaborador_ref.get("valor_subsidio_refeicao", 0) or 0)
+    imputado_remun = round(bruto - subsidio_ref, 2)
+    no_recibo, data_recibo_pdf = extrair_meta_recibo(ficheiros["recibo"])
+    data_recibo_final = data_recibo_pdf or data_recibo
+
+    linhas = [
+        {
+            "categoria custo": CATEGORIA_CUSTO,
+            "doc despesa": "Remunerações",
+            "descricao": f"Recibo de vencimento {colaborador_ref['nome']} - {mes_label}",
+            "data doc despesa": data_recibo_final,
+            "n doc despesa": no_recibo,
+            "nif fornecedor": colaborador_ref["nif"],
+            "nome fornecedor": colaborador_ref["nome"],
+            "pais fornecedor": "Portugal",
+            "total doc despesa": bruto,
+            "mapa de investimentos": 1,
+            "rubrica": RUBRICA_REMUN,
+            "n lancamento contabilistico": lanc_venc,
+            "imputado doc despesa": imputado_remun,
+            "elegivel doc despesa": imputado_remun,
+            "doc pagamento": "extrato bancário",
+            "n doc pagamento": doc_pag_venc,
+            "data doc pagamento": data_pag_venc,
+            "total doc pagamento": bruto,
+            "imputado doc pagamento": imputado_remun,
+            "elegivel doc pagamento": imputado_remun,
+        }
+    ]
 
     linhas.append(
         {
             "categoria custo": CATEGORIA_CUSTO,
-            "doc despesa": "Contribuicoes Seguranca Social",
-            "descricao": f"TSU {mes_label}",
+            "doc despesa": "Contribuições Segurança Social",
+            "descricao": f"TSU {mes_label} - {colaborador_ref['nome']}",
             "data doc despesa": data_doc_ss,
-            "n doc despesa": f"DR {no_decl_ss}",
+            "n doc despesa": no_decl_ss,
             "nif fornecedor": NIF_SS_FIXO,
             "nome fornecedor": "Seguranca Social, I.P.",
             "pais fornecedor": "Portugal",
@@ -1002,7 +1034,7 @@ def construir_dataframe_linhas(
             "n lancamento contabilistico": lanc_ss,
             "imputado doc despesa": imputado_ss,
             "elegivel doc despesa": imputado_ss,
-            "doc pagamento": "Extrato Bancario",
+            "doc pagamento": "extrato bancário",
             "n doc pagamento": no_pag_ss,
             "data doc pagamento": data_pag_ss,
             "total doc pagamento": total_ss,
@@ -1014,12 +1046,12 @@ def construir_dataframe_linhas(
     linhas.append(
         {
             "categoria custo": CATEGORIA_CUSTO,
-            "doc despesa": "Seguro de acidentes de Trabalho",
-            "descricao": f"Seguro AT {mes_label}",
-            "data doc despesa": data_pag_seg,
+            "doc despesa": "Outros Documentos",
+            "descricao": f"Seguro AT {mes_label} - {colaborador_ref['nome']}",
+            "data doc despesa": data_doc_seg,
             "n doc despesa": no_fat_seg,
             "nif fornecedor": NIF_GENERALI_FIXO,
-            "nome fornecedor": "Seguro Acidentes Trabalho",
+            "nome fornecedor": "Generali Seguros, S.A.",
             "pais fornecedor": "Portugal",
             "total doc despesa": total_seg,
             "mapa de investimentos": 1,
@@ -1027,7 +1059,7 @@ def construir_dataframe_linhas(
             "n lancamento contabilistico": lanc_seg,
             "imputado doc despesa": imputado_seg,
             "elegivel doc despesa": imputado_seg,
-            "doc pagamento": "Extrato Bancario",
+            "doc pagamento": "extrato bancário",
             "n doc pagamento": no_pag_seg,
             "data doc pagamento": data_pag_seg,
             "total doc pagamento": total_seg,

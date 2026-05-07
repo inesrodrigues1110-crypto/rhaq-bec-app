@@ -248,6 +248,75 @@ def extrair_linha_destacada_amarelo(pdf_path: Path) -> str | None:
         return None
 
 
+def extrair_linha_movimento_retangulo(pdf_path: Path) -> str | None:
+    """
+    Devolve o texto da linha dentro de um retangulo desenhado no PDF
+    (comum nos docs 2, 8 e 11 para marcar o movimento correto).
+    """
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            melhor = None
+            melhor_score = -1.0
+            for page in pdf.pages:
+                rects = page.rects or []
+                words = page.extract_words() or []
+                if not rects or not words:
+                    continue
+
+                for r in rects:
+                    x0 = float(r.get("x0", 0))
+                    x1 = float(r.get("x1", 0))
+                    top = float(r.get("top", 0))
+                    bottom = float(r.get("bottom", 0))
+                    w = x1 - x0
+                    h = bottom - top
+                    if w < 120 or h < 8:
+                        continue
+
+                    # Captura tanto retangulo com preenchimento como so contorno.
+                    has_fill = bool(r.get("non_stroking_color"))
+                    has_stroke = bool(r.get("stroking_color")) or float(r.get("linewidth", 0) or 0) > 0
+                    if not (has_fill or has_stroke):
+                        continue
+
+                    # Expansao pequena para apanhar texto todo da linha marcada.
+                    rx0 = x0 - 6
+                    rx1 = x1 + 6
+                    rtop = top - 3
+                    rbot = bottom + 3
+
+                    linha_words = []
+                    for wd in words:
+                        wx0, wx1 = float(wd["x0"]), float(wd["x1"])
+                        wtop, wbot = float(wd["top"]), float(wd["bottom"])
+                        if wx1 >= rx0 and wx0 <= rx1 and wbot >= rtop and wtop <= rbot:
+                            linha_words.append(wd)
+
+                    if not linha_words:
+                        continue
+
+                    linha_words.sort(key=lambda z: (z["top"], z["x0"]))
+                    linha_txt = " ".join(z["text"] for z in linha_words).strip()
+                    if not linha_txt:
+                        continue
+
+                    # Favorece linhas que tenham data + referencia/descricao de movimento.
+                    tem_data = re.search(r"\d{2}/\d{2}/\d{4}", linha_txt) is not None
+                    tem_mov = any(k in slug(linha_txt) for k in ["pagamento", "sal", "ss", "seguro", "fatura"])
+                    score = w * h
+                    if tem_data:
+                        score *= 1.25
+                    if tem_mov:
+                        score *= 1.2
+
+                    if score > melhor_score:
+                        melhor_score = score
+                        melhor = linha_txt
+            return melhor
+    except Exception:
+        return None
+
+
 def normalizar_numero_pt(valor_str: str) -> float:
     limpo = re.sub(r"[^\d,.\-]", "", valor_str).replace(".", "").replace(",", ".")
     return float(limpo)
@@ -392,6 +461,89 @@ def extrair_meta_recibo(recibo_pdf: Path) -> tuple[str, datetime | None]:
     return (doc_no or "Recibo Vencimento"), data_doc
 
 
+def formatar_doc_despesa_remuneracao(doc_raw: str) -> str:
+    s = (doc_raw or "").strip()
+    if not s:
+        return "E001"
+    m_e = re.search(r"\b(E\s*\d{1,6})\b", s, flags=re.IGNORECASE)
+    if m_e:
+        return re.sub(r"\s+", "", m_e.group(1)).upper()
+    m_num = re.search(r"\b(\d{1,6})\b", s)
+    if m_num:
+        return f"E{m_num.group(1)}"
+    return s
+
+
+def formatar_doc_despesa_ss(doc_raw: str, ano: int, mes: int) -> str:
+    s = (doc_raw or "").strip()
+    m = re.search(r"DMR\s*(\d{2})\s*/\s*(20\d{2})", s, flags=re.IGNORECASE)
+    if m:
+        return f"DMR {m.group(1)}/{m.group(2)}"
+    return f"DMR {mes:02d}/{ano}"
+
+
+def formatar_doc_despesa_seguro(doc_raw: str) -> str:
+    s = (doc_raw or "").strip()
+    if not s:
+        return "F 0000000/00000000"
+    # Exemplo alvo: "F 2025001/02411491"
+    m_f = re.search(r"\bF\s*([0-9]{6,8}/[0-9]{6,10})\b", s, flags=re.IGNORECASE)
+    if m_f:
+        return f"F {m_f.group(1)}"
+    m_composto = re.search(r"\b([0-9]{6,8}/[0-9]{6,10})\b", s)
+    if m_composto:
+        return f"F {m_composto.group(1)}"
+    if s.upper().startswith("F"):
+        return re.sub(r"\s+", " ", s).upper()
+    return s
+
+
+def formatar_lancamento_contabilistico(valor_raw: str, tipo: str, ano: int, mes: int) -> str:
+    s = (valor_raw or "").strip().upper()
+    m = re.search(r"\b([A-Z]{2}\s*\d{6,12})\b", s)
+    if m:
+        return re.sub(r"\s+", "", m.group(1))
+
+    yy = str(ano)[-2:]
+    mm = f"{mes:02d}"
+    if tipo in ("rem", "ss"):
+        return f"RH{yy}{mm}00001"
+    return f"OD{yy}{mm}00004"
+
+
+def formatar_doc_pagamento(valor_raw: str, tipo: str, ano: int, mes: int) -> str:
+    s = (valor_raw or "").strip()
+    s_low = s.lower()
+
+    banco = ""
+    if "novo" in s_low and "banco" in s_low:
+        banco = "Novo Banco"
+    elif "milenium" in s_low or "millenium" in s_low or "millennium" in s_low:
+        banco = "Millenium"
+    elif "santander" in s_low:
+        banco = "Santander"
+    elif "cgd" in s_low or "caixa geral" in s_low:
+        banco = "CGD"
+
+    ref = ""
+    # formato yyyy/nnn (ex.: 2025/005)
+    m_ano_ref = re.search(r"\b(20\d{2})\s*/\s*(\d{1,3})\b", s)
+    if m_ano_ref:
+        ref = f"{m_ano_ref.group(1)}/{int(m_ano_ref.group(2)):03d}"
+    else:
+        # formato m/yyyy (ex.: 7/2025)
+        m_mes_ano = re.search(r"\b(\d{1,2})\s*/\s*(20\d{2})\b", s)
+        if m_mes_ano:
+            ref = f"{int(m_mes_ano.group(1))}/{m_mes_ano.group(2)}"
+
+    if not banco:
+        banco = "Novo Banco" if tipo == "ss" else "Millenium"
+    if not ref:
+        ref = f"{mes}/{ano}" if tipo == "ss" else f"{ano}/{mes:03d}"
+
+    return f"{banco} - {ref}"
+
+
 def deduplicar_colaboradores(colaboradores: list[dict]) -> list[dict]:
     unicos: dict[tuple[str, str], dict] = {}
     for c in colaboradores:
@@ -454,16 +606,22 @@ def extrair_doc_pagamento_generico(
         flags=re.IGNORECASE,
     )
 
-    # Prioridade maxima: linha destacada a amarelo no comprovativo.
-    linha_amarela = extrair_linha_destacada_amarelo(pdf_path)
-    if linha_amarela:
-        m_ref = padrao_ref.search(linha_amarela)
-        m_data = re.search(r"(\d{2}/\d{2}/\d{4})", linha_amarela)
-        if m_ref and m_data:
-            ref_txt = re.sub(r"\s+", " ", m_ref.group(1)).strip()
+    # Prioridade maxima: linha do movimento marcada por retangulo (docs 2, 8, 11).
+    linha_mov = extrair_linha_movimento_retangulo(pdf_path) or extrair_linha_destacada_amarelo(pdf_path)
+    if linha_mov:
+        m_ref = padrao_ref.search(linha_mov)
+        datas = re.findall(r"(\d{2}/\d{2}/\d{4})", linha_mov)
+        if datas:
+            data_mov = normalizar_data(datas[0])
+            if m_ref:
+                ref_txt = re.sub(r"\s+", " ", m_ref.group(1)).strip()
+            else:
+                ref_any = padrao_ref.search(texto)
+                ref_txt = re.sub(r"\s+", " ", ref_any.group(1)).strip() if ref_any else ""
             ref_txt = re.sub(r"(?i)milenium|millennium", "Millenium", ref_txt)
             ref_txt = re.sub(r"(?i)novo\s*banco", "Novo Banco", ref_txt)
-            return ref_txt, normalizar_data(m_data.group(1))
+            if ref_txt:
+                return ref_txt, data_mov
 
     # Para docs 8/11: prioriza "Data da Operacao".
     if preferir_data_operacao:
@@ -518,6 +676,12 @@ def extrair_lancamento_vencimento(extrato_pdf: Path, ano_ref: str, mes_ref: str)
         return m.group(1)
     fallback = re.search(r"\d{2}/\d{2}/\d{4}\s+([A-Z]{2}\d+)\s+Processamento\s+Sal\S*", texto, flags=re.IGNORECASE)
     return fallback.group(1) if fallback else ""
+
+
+def extrair_primeiro_lancamento(pdf_path: Path) -> str:
+    texto = ler_pdf_texto(pdf_path)
+    m = re.search(r"\b([A-Z]{2}\d{4,})\b", texto)
+    return m.group(1) if m else ""
 
 
 def extrair_ss_folhas(ss_pdf: Path) -> tuple[float, str, datetime]:
@@ -745,7 +909,7 @@ def extrair_lancamento_seguro(extrato_seg_pdf: Path, nome_colaborador: str) -> s
             m = re.search(r"\b([A-Z]{2}\d+)\b", linha)
             if m:
                 return m.group(1)
-    return ""
+    return extrair_primeiro_lancamento(extrato_seg_pdf)
 
 
 def extrair_seguro(fatura_pdf: Path, extrato_seg_pdf: Path) -> tuple[float, str, datetime, str, datetime]:
@@ -932,6 +1096,8 @@ def construir_dataframe_linhas(
         else:
             no_pag_ss = extrair_doc_pagamento_ss(ficheiros["extrato_ss"])
     lanc_ss = extrair_lancamento_ss(ficheiros["extrato_ss"], ano_ref=ano_ref, mes_ref=mes_ref)
+    if not lanc_ss:
+        lanc_ss = extrair_primeiro_lancamento(ficheiros["extrato_ss"])
 
     if (
         campos_override.get("seg_total") is not None
@@ -964,10 +1130,9 @@ def construir_dataframe_linhas(
         if campos_override.get("ss_imputado") is not None:
             imputado_ss = garantir_float(campos_override["ss_imputado"])
         else:
-            raise ValueError(
-                "Nao foi possivel extrair 'SS imputado' do documento 9. "
-                "Preenche o campo manual 'SS - Imputado'."
-            )
+            imputado_ss = calcular_imputado_ss_11(ficheiros["folhas_ss"])
+    if imputado_ss is None:
+        imputado_ss = round(float(total_ss), 2)
 
     # Imputado Seguro: tentar extrair por nome no extrato (doc 12); fallback manual.
     if campos_override.get("seg_imputado") is not None:
@@ -976,13 +1141,17 @@ def construir_dataframe_linhas(
         nome_ref = colaboradores[0]["nome"] if colaboradores else ""
         imputado_seg = extrair_imputado_seguro_colaborador(ficheiros["extrato_seg"], nome_ref)
         if imputado_seg is None:
-            raise ValueError(
-                "Nao foi possivel extrair 'Seguro imputado' (afetacao do colaborador) do documento 12. "
-                "Preenche o campo manual 'Seguro - Imputado'."
-            )
+            imputado_seg = extrair_valor_destacado_amarelo(ficheiros["extrato_seg"])
+    if imputado_seg is None:
+        imputado_seg = round(float(total_seg), 2)
     nome_ref_lanc = colaboradores[0]["nome"] if colaboradores else ""
     lanc_seg = extrair_lancamento_seguro(ficheiros["extrato_seg"], nome_ref_lanc)
     lanc_venc = extrair_lancamento_vencimento(ficheiros["extrato_venc"], ano_ref=ano_ref, mes_ref=mes_ref)
+    if not lanc_venc:
+        lanc_venc = extrair_primeiro_lancamento(ficheiros["extrato_venc"])
+    lanc_venc = formatar_lancamento_contabilistico(lanc_venc, "rem", ano_int, mes_int)
+    lanc_ss = formatar_lancamento_contabilistico(lanc_ss, "ss", ano_int, mes_int)
+    lanc_seg = formatar_lancamento_contabilistico(lanc_seg, "seg", ano_int, mes_int)
 
     if not colaboradores:
         raise ValueError("Nao foi possivel identificar colaborador no recibo (documento 1).")
@@ -991,7 +1160,25 @@ def construir_dataframe_linhas(
     subsidio_ref = float(colaborador_ref.get("valor_subsidio_refeicao", 0) or 0)
     imputado_remun = round(bruto - subsidio_ref, 2)
     no_recibo, data_recibo_pdf = extrair_meta_recibo(ficheiros["recibo"])
+    if not no_recibo or no_recibo == "Recibo Vencimento":
+        m_rec = re.search(r"(\d{4,})", ficheiros["recibo"].stem)
+        if m_rec:
+            no_recibo = f"Recibo {m_rec.group(1)}"
     data_recibo_final = data_recibo_pdf or data_recibo
+    if not doc_pag_venc:
+        doc_pag_venc = lanc_venc or "Pagamento Vencimentos"
+    if not no_pag_ss:
+        no_pag_ss = lanc_ss or "Pagamento SS"
+    if not no_pag_seg:
+        no_pag_seg = lanc_seg or "Pagamento Seguro"
+    if not no_decl_ss:
+        no_decl_ss = "DMR"
+    doc_pag_venc = formatar_doc_pagamento(doc_pag_venc, "rem", ano_int, mes_int)
+    no_pag_ss = formatar_doc_pagamento(no_pag_ss, "ss", ano_int, mes_int)
+    no_pag_seg = formatar_doc_pagamento(no_pag_seg, "seg", ano_int, mes_int)
+    no_recibo = formatar_doc_despesa_remuneracao(no_recibo)
+    no_decl_ss = formatar_doc_despesa_ss(no_decl_ss, ano_int, mes_int)
+    no_fat_seg = formatar_doc_despesa_seguro(no_fat_seg)
 
     linhas = [
         {

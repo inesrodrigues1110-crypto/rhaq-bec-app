@@ -317,6 +317,78 @@ def extrair_linha_movimento_retangulo(pdf_path: Path) -> str | None:
         return None
 
 
+def extrair_valor_movimento_retangulo(
+    pdf_path: Path, texto_alvo: str | None = None, max_esperado: float | None = None
+) -> float | None:
+    """
+    Extrai valor monetario da linha marcada por retangulo.
+    Se texto_alvo for indicado, tenta priorizar a linha que contenha esse texto.
+    """
+    alvo = slug(texto_alvo or "")
+    melhor_valor = None
+    melhor_score = -1.0
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages:
+                rects = page.rects or []
+                words = page.extract_words() or []
+                if not rects or not words:
+                    continue
+
+                for r in rects:
+                    x0 = float(r.get("x0", 0))
+                    x1 = float(r.get("x1", 0))
+                    top = float(r.get("top", 0))
+                    bottom = float(r.get("bottom", 0))
+                    w = x1 - x0
+                    h = bottom - top
+                    if w < 120 or h < 8:
+                        continue
+                    has_fill = bool(r.get("non_stroking_color"))
+                    has_stroke = bool(r.get("stroking_color")) or float(r.get("linewidth", 0) or 0) > 0
+                    if not (has_fill or has_stroke):
+                        continue
+
+                    rx0, rx1 = x0 - 6, x1 + 6
+                    rtop, rbot = top - 3, bottom + 3
+                    linha_words = []
+                    for wd in words:
+                        wx0, wx1 = float(wd["x0"]), float(wd["x1"])
+                        wtop, wbot = float(wd["top"]), float(wd["bottom"])
+                        if wx1 >= rx0 and wx0 <= rx1 and wbot >= rtop and wtop <= rbot:
+                            linha_words.append(wd)
+                    if not linha_words:
+                        continue
+                    linha_words.sort(key=lambda z: (z["top"], z["x0"]))
+                    linha_txt = " ".join(z["text"] for z in linha_words).strip()
+                    if not linha_txt:
+                        continue
+
+                    vals = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", linha_txt)
+                    if not vals:
+                        continue
+                    nums = [normalizar_numero_pt(v) for v in vals]
+                    if max_esperado is not None:
+                        candidatos = [n for n in nums if 0 < n <= max_esperado + 0.01]
+                    else:
+                        candidatos = [n for n in nums if n > 0]
+                    if not candidatos:
+                        continue
+                    val = candidatos[-1]
+
+                    score = w * h
+                    if alvo and alvo in slug(linha_txt):
+                        score *= 1.5
+                    if re.search(r"\d{2}/\d{2}/\d{4}", linha_txt):
+                        score *= 1.15
+                    if score > melhor_score:
+                        melhor_score = score
+                        melhor_valor = round(val, 2)
+        return melhor_valor
+    except Exception:
+        return None
+
+
 def normalizar_numero_pt(valor_str: str) -> float:
     limpo = re.sub(r"[^\d,.\-]", "", valor_str).replace(".", "").replace(",", ".")
     return float(limpo)
@@ -817,6 +889,9 @@ def extrair_lancamento_ss(extrato_ss_pdf: Path, ano_ref: str, mes_ref: str) -> s
 
 def extrair_imputado_ss_extrato(extrato_ss_pdf: Path, ano_ref: str | None = None, mes_ref: str | None = None) -> float | None:
     # Regra unica: valor da linha destacada a amarelo no documento 9.
+    val_ret = extrair_valor_movimento_retangulo(extrato_ss_pdf, texto_alvo="seguranca social")
+    if val_ret is not None:
+        return val_ret
     val_amarelo = extrair_valor_destacado_amarelo(extrato_ss_pdf)
     if val_amarelo is not None:
         return val_amarelo
@@ -1141,6 +1216,10 @@ def construir_dataframe_linhas(
         nome_ref = colaboradores[0]["nome"] if colaboradores else ""
         imputado_seg = extrair_imputado_seguro_colaborador(ficheiros["extrato_seg"], nome_ref)
         if imputado_seg is None:
+            imputado_seg = extrair_valor_movimento_retangulo(
+                ficheiros["extrato_seg"], texto_alvo=nome_ref, max_esperado=float(total_seg)
+            )
+        if imputado_seg is None:
             imputado_seg = extrair_valor_destacado_amarelo(ficheiros["extrato_seg"])
     if imputado_seg is None:
         imputado_seg = round(float(total_seg), 2)
@@ -1280,6 +1359,13 @@ def preencher_excel(template_excel: Path, saida_excel: Path, df_linhas: pd.DataF
     for i, nome in enumerate(cabecalho, start=1):
         if nome is not None:
             idx_col[slug(str(nome))] = i
+    # Fallback fixo por letras para evitar falhas de cabecalho.
+    idx_col.setdefault("ordem", 1)  # A
+    idx_col.setdefault("n doc despesa", 8)  # H
+    idx_col.setdefault("imputado doc despesa", 22)  # V
+    idx_col.setdefault("elegivel doc despesa", 23)  # W
+    idx_col.setdefault("n lancamento contabilistico", 21)  # U
+    idx_col.setdefault("n doc pagamento", 25)  # Y
 
     ultima = ws.max_row
     ordem = ws.cell(row=ultima, column=1).value or 0

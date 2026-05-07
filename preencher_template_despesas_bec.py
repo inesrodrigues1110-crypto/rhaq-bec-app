@@ -318,7 +318,10 @@ def extrair_linha_movimento_retangulo(pdf_path: Path) -> str | None:
 
 
 def extrair_valor_movimento_retangulo(
-    pdf_path: Path, texto_alvo: str | None = None, max_esperado: float | None = None
+    pdf_path: Path,
+    texto_alvo: str | None = None,
+    max_esperado: float | None = None,
+    estrategia: str = "ultimo",
 ) -> float | None:
     """
     Extrai valor monetario da linha marcada por retangulo.
@@ -374,7 +377,12 @@ def extrair_valor_movimento_retangulo(
                         candidatos = [n for n in nums if n > 0]
                     if not candidatos:
                         continue
-                    val = candidatos[-1]
+                    if estrategia == "min":
+                        val = min(candidatos)
+                    elif estrategia == "max":
+                        val = max(candidatos)
+                    else:
+                        val = candidatos[-1]
 
                     score = w * h
                     if alvo and alvo in slug(linha_txt):
@@ -387,6 +395,63 @@ def extrair_valor_movimento_retangulo(
         return melhor_valor
     except Exception:
         return None
+
+
+def extrair_valor_debito_destacado_doc9(extrato_ss_pdf: Path, total_ss: float | None = None) -> float | None:
+    """
+    Regra SS: ler o valor da linha destacada (amarelo/retangulo) na coluna Debito do doc 9.
+    """
+    try:
+        with pdfplumber.open(extrato_ss_pdf) as pdf:
+            candidatos: list[tuple[float, float]] = []  # (x1, valor)
+            for page in pdf.pages:
+                rects = page.rects or []
+                words = page.extract_words() or []
+                if not rects or not words:
+                    continue
+
+                for r in rects:
+                    # prioriza retangulos amarelos, mas aceita contorno sem fill
+                    is_yellow = _is_yellow_color(r.get("non_stroking_color"))
+                    has_stroke = bool(r.get("stroking_color")) or float(r.get("linewidth", 0) or 0) > 0
+                    if not (is_yellow or has_stroke):
+                        continue
+
+                    rx0 = float(r.get("x0", 0)) - 8
+                    rx1 = float(r.get("x1", 0)) + 8
+                    rtop = float(r.get("top", 0)) - 3
+                    rbot = float(r.get("bottom", 0)) + 3
+
+                    linha_words = []
+                    for w in words:
+                        wx0, wx1 = float(w["x0"]), float(w["x1"])
+                        wtop, wbot = float(w["top"]), float(w["bottom"])
+                        if wx1 >= rx0 and wx0 <= rx1 and wbot >= rtop and wtop <= rbot:
+                            linha_words.append(w)
+                    if not linha_words:
+                        continue
+
+                    # Debito costuma estar mais a direita -> escolhe valor mais a direita.
+                    for w in linha_words:
+                        txt = w.get("text", "")
+                        if re.fullmatch(r"\d{1,3}(?:[\.\s]\d{3})*,\d{2}", txt):
+                            try:
+                                val = normalizar_numero_pt(txt)
+                            except Exception:
+                                continue
+                            if val <= 0:
+                                continue
+                            if total_ss is not None and val >= total_ss:
+                                # Em V/W queremos imputado do colaborador, nao o total agregado.
+                                continue
+                            candidatos.append((float(w["x1"]), round(val, 2)))
+
+            if candidatos:
+                candidatos.sort(key=lambda t: t[0])  # direita por ultimo
+                return candidatos[-1][1]
+    except Exception:
+        return None
+    return None
 
 
 def normalizar_numero_pt(valor_str: str) -> float:
@@ -887,13 +952,24 @@ def extrair_lancamento_ss(extrato_ss_pdf: Path, ano_ref: str, mes_ref: str) -> s
     return fallback.group(1) if fallback else ""
 
 
-def extrair_imputado_ss_extrato(extrato_ss_pdf: Path, ano_ref: str | None = None, mes_ref: str | None = None) -> float | None:
-    # Regra unica: valor da linha destacada a amarelo no documento 9.
-    val_ret = extrair_valor_movimento_retangulo(extrato_ss_pdf, texto_alvo="seguranca social")
+def extrair_imputado_ss_extrato(
+    extrato_ss_pdf: Path,
+    ano_ref: str | None = None,
+    mes_ref: str | None = None,
+    total_ss: float | None = None,
+) -> float | None:
+    # Regra unica pedida: valor destacado no doc 9, coluna Debito.
+    val_debito = extrair_valor_debito_destacado_doc9(extrato_ss_pdf, total_ss=total_ss)
+    if val_debito is not None:
+        return val_debito
+    # fallback tecnico secundario na mesma ideia de destaque
+    val_ret = extrair_valor_movimento_retangulo(
+        extrato_ss_pdf, texto_alvo="seguranca social", max_esperado=total_ss, estrategia="min"
+    )
     if val_ret is not None:
         return val_ret
     val_amarelo = extrair_valor_destacado_amarelo(extrato_ss_pdf)
-    if val_amarelo is not None:
+    if val_amarelo is not None and (total_ss is None or val_amarelo < total_ss):
         return val_amarelo
     return None
 
@@ -908,64 +984,39 @@ def calcular_imputado_ss_11(ss_pdf: Path) -> float | None:
     return round(total_remun * 0.11, 2)
 
 
+def calcular_imputado_ss_por_colaboradores(colaboradores: list[dict]) -> float | None:
+    if not colaboradores:
+        return None
+    total = 0.0
+    for c in colaboradores:
+        bruto = float(c.get("valor_bruto", 0) or 0)
+        if bruto > 0:
+            total += round(bruto * 0.11, 2)
+    if total <= 0:
+        return None
+    return round(total, 2)
+
+
 def extrair_imputado_seguro_colaborador(extrato_seg_pdf: Path, nome_colaborador: str) -> float | None:
     texto = ler_pdf_texto(extrato_seg_pdf)
     if not texto.strip() or not nome_colaborador.strip():
         return None
 
-    # Fallback principal em texto corrido (quando o PDF perde quebras de linha).
-    texto_slug = slug(texto)
-    padrao_texto_corrido = re.search(
-        r"afetacao\s+seg\w*\s+at\s+\d{2}\s+20\d{2}\s+joao\s+ferreira[\s\S]{0,60}?(\d{1,3}(?:[\.\s]\d{3})*,\d{2})",
-        texto_slug,
-        flags=re.IGNORECASE,
-    )
-    if padrao_texto_corrido:
-        return normalizar_numero_pt(padrao_texto_corrido.group(1))
-
-    # Regra hard: linha "Afetacao ... Joao Ferreira" no documento 12.
     alvo_nome = slug(nome_colaborador)
+    alvo_tokens = [t for t in alvo_nome.split() if t]
     for linha in texto.splitlines():
-        s = slug(linha)
-        if "afetacao" in s and "seg" in s and alvo_nome in s:
-            vals = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", linha)
-            if vals:
-                nums = [normalizar_numero_pt(v) for v in vals]
-                candidatos = [n for n in nums if 1 <= n <= 2000]
-                if candidatos:
-                    return candidatos[-1]
-
-    # Regra hard adicional para OCR degradado: apenas tokens joao + ferreira.
-    for linha in texto.splitlines():
-        s = slug(linha)
-        if "afetacao" in s and "seg" in s and "joao" in s and "ferreira" in s:
-            vals = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", linha)
-            if vals:
-                nums = [normalizar_numero_pt(v) for v in vals]
-                candidatos = [n for n in nums if 1 <= n <= 2000]
-                if candidatos:
-                    return candidatos[-1]
-
-    alvo = slug(nome_colaborador)
-    alvo_tokens = [t for t in alvo.split() if t]
-    linhas = texto.splitlines()
-
-    # Regra unica: linha de "Afetacao ... <nome>" no documento 12.
-    for linha in linhas:
         s = slug(linha)
         if "afetacao" not in s or "seg" not in s:
             continue
-        nome_bate = (alvo in s) if alvo else False
-        if not nome_bate and alvo_tokens:
-            nome_bate = all(tok in s for tok in alvo_tokens)
-        if not nome_bate:
+        if alvo_tokens and not all(tok in s for tok in alvo_tokens):
             continue
         vals = re.findall(r"(\d{1,3}(?:[\.\s]\d{3})*,\d{2})", linha)
         if vals:
             nums = [normalizar_numero_pt(v) for v in vals]
-            candidatos = [n for n in nums if 1 <= n <= 2000]
+            # Regra pedida: usar o menor valor da linha de afetação do colaborador.
+            candidatos = [n for n in nums if 0 < n < 500]
             if candidatos:
-                return candidatos[-1]
+                return round(min(candidatos), 2)
     return None
 
 
@@ -1200,14 +1251,20 @@ def construir_dataframe_linhas(
             no_pag_seg, data_pag_seg = parsed_pag_seg
 
     # Imputado SS: regra de negocio -> tentar ler do doc 9 primeiro.
-    imputado_ss = extrair_imputado_ss_extrato(ficheiros["extrato_ss"], ano_ref=ano_ref, mes_ref=mes_ref)
+    imputado_ss = extrair_imputado_ss_extrato(
+        ficheiros["extrato_ss"], ano_ref=ano_ref, mes_ref=mes_ref, total_ss=float(total_ss)
+    )
     if imputado_ss is None:
         if campos_override.get("ss_imputado") is not None:
             imputado_ss = garantir_float(campos_override["ss_imputado"])
-        else:
-            imputado_ss = calcular_imputado_ss_11(ficheiros["folhas_ss"])
+    # Sanidade: imputado de colaborador nao pode vir proximo do total agregado.
+    if imputado_ss is not None and imputado_ss >= (float(total_ss) * 0.8):
+        imputado_ss = None
     if imputado_ss is None:
-        imputado_ss = round(float(total_ss), 2)
+        raise ValueError(
+            "Nao foi possivel extrair o imputado da SS no doc 9 (linha destacada na coluna Debito). "
+            "Preenche o campo manual 'SS - Imputado' ou confirma o destaque no PDF."
+        )
 
     # Imputado Seguro: tentar extrair por nome no extrato (doc 12); fallback manual.
     if campos_override.get("seg_imputado") is not None:
@@ -1215,14 +1272,15 @@ def construir_dataframe_linhas(
     else:
         nome_ref = colaboradores[0]["nome"] if colaboradores else ""
         imputado_seg = extrair_imputado_seguro_colaborador(ficheiros["extrato_seg"], nome_ref)
-        if imputado_seg is None:
-            imputado_seg = extrair_valor_movimento_retangulo(
-                ficheiros["extrato_seg"], texto_alvo=nome_ref, max_esperado=float(total_seg)
-            )
-        if imputado_seg is None:
-            imputado_seg = extrair_valor_destacado_amarelo(ficheiros["extrato_seg"])
+    # Regra estrita: valor do colaborador deve vir da linha de Afetacao no doc 12.
+    if imputado_seg is not None and imputado_seg >= (float(total_seg) * 0.8):
+        imputado_seg = None
     if imputado_seg is None:
-        imputado_seg = round(float(total_seg), 2)
+        raise ValueError(
+            "Nao foi possivel extrair o imputado do Seguro no doc 12 "
+            "(linha 'Afetacao ... <colaborador>'). "
+            "Preenche o campo manual 'Seguro - Imputado' ou confirma o nome na linha."
+        )
     nome_ref_lanc = colaboradores[0]["nome"] if colaboradores else ""
     lanc_seg = extrair_lancamento_seguro(ficheiros["extrato_seg"], nome_ref_lanc)
     lanc_venc = extrair_lancamento_vencimento(ficheiros["extrato_venc"], ano_ref=ano_ref, mes_ref=mes_ref)
